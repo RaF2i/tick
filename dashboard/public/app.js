@@ -687,6 +687,15 @@ async function boot(reset = true) {
 
 dateInput.value = new Date().toISOString().slice(0, 10);
 $('#loadAvailability').addEventListener('click', loadAvail);
+// Clear the loaded slots after tickets are in cart (resets steps 2–3, keeps the date).
+$('#clearSlots').addEventListener('click', () => {
+  state.slots = [];
+  state.slot = null;
+  slotGrid.innerHTML = '';
+  slotState.textContent = 'Pick a date, then check availability.';
+  $('#step2').classList.remove('active');
+  $('#step3').classList.remove('active');
+});
 dateInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); loadAvail(); } });
 slotGrid.addEventListener('click', (e) => {
   const b = e.target.closest('[data-slot]');

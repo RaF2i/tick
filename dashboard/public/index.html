@@ -31,11 +31,12 @@
     </div>
 
     <section class="panel">
-      <div class="panel-heading"><div><p class="eyebrow">ADD TO CART — SAME FLOW AS ADD.JS</p><h2>New hold</h2></div></div>
+      <div class="panel-heading"><div><p class="eyebrow">ADD TO CART</p><h2>New hold</h2></div></div>
       <div class="stepper"><span class="step active" id="step1">1 Date</span><span class="step" id="step2">2 Slot</span><span class="step" id="step3">3 Confirm</span></div>
       <div class="date-row">
         <label><span>Date</span><input id="dateInput" type="date"></label>
         <button id="loadAvailability" class="button button-secondary" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>Check availability</button>
+        <button id="clearSlots" class="button button-ghost" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>Clear</button>
       </div>
       <div id="slotState" class="empty-preview">Pick a date, then check availability.</div>
       <div id="slotGrid" class="slot-grid"></div>
