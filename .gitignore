@@ -1,0 +1,9 @@
+# secrets — never commit
+.env
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+auto-cart/add-result.json
+dashboard/logs/
+
+node_modules/

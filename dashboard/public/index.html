@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0a0e15">
+<title>Ticket Control — Sevilla Console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="icon" href="/tick.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<div id="pageLoader" class="page-loader"><span class="spinner"></span><span>Connecting to controller…</span></div>
+<div class="app-shell">
+  <main class="main-content">
+    <div id="toasts" class="toasts" aria-live="polite"></div>
+
+    <header class="topbar sticky-bar">
+      <div class="brand"><span class="brand-mark"><svg viewBox="0 0 24 24" fill="none" stroke="#1C274C" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="Ticket Control logo"><path d="M2 9a3 3 0 0 1 0 6v2a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-2a3 3 0 0 1 0-6V7a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2Z"/><path d="M13 5v2"/><path d="M13 11v2"/><path d="M13 17v2"/></svg></span><div><strong>Ticket Control</strong><span>SEVILLA · OPERATIONS CONSOLE</span></div></div>
+      <div class="topbar-meta"><span class="status-line" id="sideStatus">Checking…</span><span class="pill" id="autoPill">Auto: …</span><button id="autoToggle" class="button button-secondary" type="button">Start auto</button><button id="logoutBtn" class="button button-ghost button-small hidden" type="button" title="Log out"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>Logout</button></div>
+    </header>
+
+    <div id="listView">
+    <div class="metric-grid">
+      <article class="metric-card"><span class="metric-label"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>Active holdings</span><strong id="metricActive">0</strong></article>
+      <article class="metric-card"><span class="metric-label"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 9a3 3 0 0 1 0 6v2a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-2a3 3 0 0 1 0-6V7a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2Z"/><path d="M13 5v2"/><path d="M13 11v2"/><path d="M13 17v2"/></svg>Tickets in carts</span><strong id="metricAdded">0</strong></article>
+      <article class="metric-card"><span class="metric-label"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>Due now</span><strong id="metricDue">0</strong><span class="metric-foot" id="tickInfo">tick —</span></article>
+    </div>
+
+    <section class="panel">
+      <div class="panel-heading"><div><p class="eyebrow">ADD TO CART — SAME FLOW AS ADD.JS</p><h2>New hold</h2></div></div>
+      <div class="stepper"><span class="step active" id="step1">1 Date</span><span class="step" id="step2">2 Slot</span><span class="step" id="step3">3 Confirm</span></div>
+      <div class="date-row">
+        <label><span>Date</span><input id="dateInput" type="date"></label>
+        <button id="loadAvailability" class="button button-secondary" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>Check availability</button>
+      </div>
+      <div id="slotState" class="empty-preview">Pick a date, then check availability.</div>
+      <div id="slotGrid" class="slot-grid"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-heading"><div><p class="eyebrow">PERSISTED STATE</p><h2>Holdings</h2></div><button id="refreshHoldings" class="button button-ghost" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>Refresh</button></div>
+      <div id="nextUp" class="next-list"></div>
+      <div class="table-wrap"><table id="holdingsTable"><thead><tr><th>Date / time</th><th>Status</th><th></th></tr></thead><tbody></tbody></table></div>
+    </section>
+
+    <details class="panel details">
+      <summary><span class="eyebrow">AUDIT TRAIL</span><strong>Activity &amp; server log</strong><span class="summary-actions"><button id="refreshActivity" class="button button-ghost button-small" type="button">Refresh</button> <button id="refreshLogs" class="button button-secondary button-small" type="button">Refresh logs</button></span></summary>
+      <div class="panel-heading"><h2>Server log</h2><span class="mono muted-text">logs/dashboard-&lt;date&gt;.log</span></div>
+      <pre id="logsPre" class="config-pre">Loading…</pre>
+      <div class="table-wrap"><table id="eventsTable"><thead><tr><th>Time</th><th>Endpoint</th><th>Code</th><th>Holding</th></tr></thead><tbody></tbody></table></div>
+    </details>
+
+    <details class="panel details"><summary>Controller settings</summary><pre id="configPre" class="config-pre">Loading…</pre></details>
+    </div>
+
+    <section id="holdingPage" class="holding-page hidden" aria-live="polite">
+      <button id="holdingBack" class="button button-ghost" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>All holdings</button>
+      <p class="eyebrow">HOLDING DETAIL</p>
+      <h2 id="holdingTitle" class="holding-title">Holding</h2>
+      <div class="holding-actions">
+        <button id="holdingRefresh" class="button button-secondary" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>Refresh cart</button>
+        <button id="holdingAuto" class="button button-secondary" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>Auto</button>
+        <button id="holdingStop" class="button button-ghost" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>Stop</button>
+        <button id="holdingRemove" class="button button-danger" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>Remove</button>
+      </div>
+      <p class="dialog-error hidden" id="holdingError"></p>
+      <div id="holdingBody" class="holding-grid"></div>
+    </section>
+
+    <footer class="page-footer"><span>Manual + auto controller · dark console</span><span class="mono">v0.5 · dark only</span></footer>
+  </main>
+</div>
+
+<dialog id="slotDialog" class="dialog">
+  <form method="dialog" class="dialog-card" id="slotForm">
+    <p class="eyebrow">3 · CONFIRM ADD TO CART</p>
+    <h2 id="slotTitle">Slot</h2>
+    <p class="mono muted-text" id="slotMeta">—</p>
+    <label><span>Tickets (empty = take all <strong id="slotAvailHint">0</strong> available)</span><input id="slotQty" type="number" min="1" placeholder="empty = take all"></label>
+    <div id="slotChunks" class="chunk-list"></div>
+    <p class="dialog-error hidden" id="slotError"></p>
+    <label class="check"><input id="slotAuto" type="checkbox" checked><span>Auto re-add after</span></label>
+    <div class="auto-row"><input id="slotRepeat" type="number" min="1" max="1440" value="30"><span>minutes</span><span class="field-hint">Re-runs automatically until stopped.</span></div>
+    <div class="dialog-actions">
+      <button value="cancel" class="button button-ghost" type="submit">Cancel</button>
+      <button id="slotConfirm" value="default" class="button button-primary" type="submit"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 9a3 3 0 0 1 0 6v2a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-2a3 3 0 0 1 0-6V7a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2Z"/><path d="M13 5v2"/><path d="M13 11v2"/><path d="M13 17v2"/></svg>Add to cart</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="confirmDialog" class="dialog">
+  <form method="dialog" class="dialog-card narrow">
+    <h2 id="confirmTitle">Are you sure?</h2>
+    <p class="muted-text" id="confirmText"></p>
+    <div class="dialog-actions">
+      <button value="cancel" class="button button-ghost" type="submit">Cancel</button>
+      <button id="confirmYes" value="default" class="button button-danger" type="submit">Confirm</button>
+    </div>
+  </form>
+</dialog>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>

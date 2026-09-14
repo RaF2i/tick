@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0a0e15">
+<title>Login — Ticket Control</title>
+<link rel="icon" href="/tick.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<div class="login-wrap">
+  <form id="loginForm" class="login-card" autocomplete="off">
+    <span class="brand-mark login-mark"><img src="/tick.svg" alt="Ticket Control logo"></span>
+    <h1>Ticket Control</h1>
+    <p class="muted-text">Enter the dashboard password to continue.</p>
+    <label><span>Password</span><input id="loginPass" type="password" autocomplete="current-password" placeholder="••••••••"></label>
+    <p class="dialog-error hidden" id="loginError"></p>
+    <button id="loginBtn" class="button button-primary" type="submit">Unlock</button>
+  </form>
+</div>
+<script>
+const form = document.querySelector('#loginForm');
+const pass = document.querySelector('#loginPass');
+const btn = document.querySelector('#loginBtn');
+const err = document.querySelector('#loginError');
+pass.focus();
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  err.classList.add('hidden');
+  btn.disabled = true;
+  btn.textContent = 'Checking…';
+  try {
+    const r = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: pass.value }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+    location.href = '/';
+  } catch (ex) {
+    err.textContent = ex.message;
+    err.classList.remove('hidden');
+    pass.select();
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Unlock';
+  }
+});
+</script>
+</body>
+</html>
