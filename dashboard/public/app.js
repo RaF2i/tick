@@ -85,7 +85,8 @@ function setBtn(btn, loading, loadingText) {
 
 function chunksFor(q) { const c = []; let x = Math.max(0, Math.floor(Number(q) || 0)); while (x > 0) { c.push(Math.min(30, x)); x -= Math.min(30, x); } return c; }
 function fmtD(d) { if (!d) return '—'; return new Intl.DateTimeFormat('en-GB', { day: '2-digit', month: 'short' }).format(new Date(d + 'T12:00:00')); }
-function fmtDT(v) { if (!v) return '—'; const d = new Date(v); return isNaN(d) ? v : new Intl.DateTimeFormat('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }).format(d); }
+function fmtDT(v) { if (!v) return '—'; const d = new Date(v); return isNaN(d) ? v : new Intl.DateTimeFormat('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(d); }
+function fmtT(t) { if (!t) return '—'; return /^\d{2}:\d{2}$/.test(t) ? `${t}:00` : t; }
 
 // Live countdown text for a next_run_at timestamp
 function countdownText(iso) {
@@ -313,7 +314,7 @@ function renderHoldings() {
       : `OccID ${h.timetable_id} · want ${h.requested_quantity} · in cart ${added} · ${esc(modeLabel(h))}`;
     return `<tr><td><strong>${fmtD(h.local_date)} ${esc(h.local_time)}</strong><span class="sub-cell">${sub}</span></td>
       <td><span class="status-badge status-${badgeFor(h.status)}">${esc(statusLabel(h.status))}</span></td>
-      <td class="actions-cell"><button class="table-action" data-view="${h.id}">${I.eye}View</button></td></tr>`;
+      <td class="actions-cell"><button class="table-action" data-view="${h.id}">${I.eye}View</button>${h.status === 'removed' ? `<button class="table-action icon-only danger" data-purge="${h.id}" type="button" title="Delete permanently" aria-label="Delete holding #${h.id} permanently">${I.x}</button>` : ''}</td></tr>`;
   }).join('') : '<tr><td colspan="3" class="empty-cell">No holdings yet.</td></tr>';
 }
 
@@ -407,7 +408,7 @@ window.addEventListener('popstate', () => {
 
 // Title + body + buttons, reused for live refresh while the dialog stays open.
 function renderHoldingInto(h) {
-  $('#holdingTitle').textContent = `#${h.id} · ${h.local_date} ${h.local_time} · OccID ${h.timetable_id}`;
+  $('#holdingTitle').textContent = `#${h.id} · ${h.local_date} ${fmtT(h.local_time)} · OccID ${h.timetable_id}`;
   const activeItems = activeItemsOf(h);
   const historyItems = (h.cartItems || []).filter((i) => i.status !== 'active');
   const inCart = h.status === 'removed' ? 0 : activeQtyOf(h);
@@ -438,7 +439,7 @@ function renderHoldingInto(h) {
       <dl class="kv-list">
         ${row('State', `<span class="status-badge status-${badgeFor(h.status)}">${esc(statusLabel(h.status))}</span>`)}
         ${row('Mode', h.auto_enabled ? `<span class="status-badge status-pending">AUTO · every ${h.repeat_minutes}m</span>` : '<span class="status-badge status-muted">Manual</span>')}
-        ${row('Slot', `${esc(h.local_date)} ${esc(h.local_time)} · OccID ${h.timetable_id} · ticket ${h.ticket_id}`)}
+        ${row('Slot', `${esc(h.local_date)} ${esc(fmtT(h.local_time))} · OccID ${h.timetable_id} · ticket ${h.ticket_id}`)}
         ${row('Wanted / in cart', `${h.requested_quantity} / ${inCart}${h.planned_quantity ? ` (planned ${h.planned_quantity})` : ''}`)}
         ${row('Chunks', chunks.length ? `<span class="mono">[${chunks.join(' + ')}]</span>` : '—')}
         ${row('Total', h.price_total != null ? `${h.price_total} ${esc(h.currency || 'EUR')}` : '—')}
@@ -557,6 +558,26 @@ function askConfirm({ title, text, confirmLabel = 'Confirm', danger = true }) {
   });
 }
 function closeConfirm() { try { if (confirmDialog.open) confirmDialog.close(); } catch { /* ignore */ } }
+
+async function purgeHolding(id) {
+  const ok = await askConfirm({
+    title: 'Delete holding?',
+    text: `Permanently deletes holding #${id} and its history from the database. Its cart is already gone — this cannot be undone.`,
+    confirmLabel: 'Delete',
+    danger: true,
+  });
+  if (!ok) return;
+  const yes = $('#confirmYes');
+  setBtn(yes, true, 'Deleting…');
+  try {
+    await api(`/api/holdings/${id}/purge`, { method: 'POST', body: '{}' });
+    if (state.holding && state.holding.id === id) closeHolding();
+    await loadHoldings({ silent: true });
+    showNotice(`Holding #${id} deleted.`, 'success');
+  } catch (e) { showNotice(e.message, 'error'); await loadHoldings({ silent: true }); }
+  finally { setBtn(yes, false); }
+  closeConfirm();
+}
 
 async function holdingAction(a) {
   const h = state.holding;
@@ -706,6 +727,8 @@ slotAuto.addEventListener('change', () => { slotRepeat.disabled = !slotAuto.chec
 $('#slotForm').addEventListener('submit', confirmSlot);
 slotDialog.addEventListener('close', () => { $('#slotForm').dataset.busy = 'false'; const b = $('#slotConfirm'); if (b.dataset.loading === 'true') setBtn(b, false); b.innerHTML = `${I.ticket}Add to cart`; });
 $('#holdingsTable tbody').addEventListener('click', async (e) => {
+  const p = e.target.closest('[data-purge]');
+  if (p) { purgeHolding(Number(p.dataset.purge)); return; }
   const v = e.target.closest('[data-view]');
   if (!v) return;
   v.disabled = true;

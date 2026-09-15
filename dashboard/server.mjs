@@ -203,6 +203,9 @@ ensureColumn('holdings', 'auth_token', 'auth_token TEXT');
 ensureColumn('holdings', 'auth_obtained_at', 'auth_obtained_at TEXT');
 ensureColumn('holdings', 'cart_verified_at', 'cart_verified_at TEXT');
 
+// One-time normalization: slot times stored as HH:MM gain :00 seconds.
+db.prepare(`UPDATE holdings SET local_time = local_time || ':00' WHERE local_time LIKE '__:__'`).run();
+
 // Indexes depending on migrated columns must come after ensureColumn.
 db.exec(`
   CREATE INDEX IF NOT EXISTS idx_holdings_schedule ON holdings (auto_enabled, status, next_run_at);
@@ -497,7 +500,8 @@ async function createHolding(body) {
   const date = String(body.date || '');
   const time = String(body.time || '');
   dateParts(date);
-  if (!/^\d{2}:\d{2}$/.test(time)) throw errorWithStatus('Time must use HH:MM format.', 400);
+  if (!/^\d{2}:\d{2}(:\d{2})?$/.test(time)) throw errorWithStatus('Time must use HH:MM format.', 400);
+  const timeStored = time.length === 5 ? `${time}:00` : time;
   const timetableId = toInt(body.timetableId);
   const ticketId = toInt(body.ticketId, DEFAULT_TICKET_ID);
   const quantity = toInt(body.quantity);
@@ -509,7 +513,7 @@ async function createHolding(body) {
     INSERT INTO holdings
       (local_date, local_time, timetable_id, ticket_id, requested_quantity, chunks_json, status, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, ?)
-  `).run(date, time, timetableId, ticketId, quantity, JSON.stringify(chunks), timestamp, timestamp);
+  `).run(date, timeStored, timetableId, ticketId, quantity, JSON.stringify(chunks), timestamp, timestamp);
   return getHolding(Number(result.lastInsertRowid));
 }
 
@@ -952,6 +956,15 @@ async function handleApi(req, res, url) {
       const out = await removeHolding(id);
       logLine(`HOLDING #${id}: remove endpoint done -> ${out.status}`);
       return sendJson(res, 200, { holding: out });
+    }
+    if (req.method === 'POST' && segments[3] === 'purge') {
+      // Permanent delete for housekeeping — removed holdings only, so a live
+      // cart can never be orphaned. cart_items + runs CASCADE, audit keeps NULLs.
+      const target = getHolding(id);
+      if (target.status !== 'removed') throw errorWithStatus('Only removed holdings can be deleted permanently.', 409);
+      db.prepare('DELETE FROM holdings WHERE id = ?').run(id);
+      logLine(`HOLDING #${id}: purged from database`);
+      return sendJson(res, 200, { ok: true });
     }
   }
   return sendJson(res, 404, { error: 'Route not found.' });

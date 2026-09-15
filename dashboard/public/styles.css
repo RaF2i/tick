@@ -243,6 +243,8 @@ td strong { letter-spacing: -.01em; }
 }
 .table-action:hover { border-color: var(--accent); color: var(--accent); transform: translateY(-1px); box-shadow: 0 5px 14px rgba(0,0,0,.4), 0 0 0 3px rgba(45,212,191,.08); }
 .table-action:active { transform: translateY(0); }
+.table-action.danger { border-color: rgba(248,113,113,.5); color: #fca5a5; }
+.table-action.danger:hover { border-color: #f87171; color: #fecaca; background: linear-gradient(180deg, rgba(248,113,113,.22), rgba(248,113,113,.1)); }
 .table-action:disabled { opacity: .4; cursor: not-allowed; transform: none; }
 
 /* ---------- Detail dialog blocks ---------- */
