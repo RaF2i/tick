@@ -222,10 +222,10 @@ const toInt = (value, fallback = 0) => {
 
 // Day-before auto-cutoff: for a holding with slot date D (YYYY-MM-DD,
 // Europe/Madrid calendar day), automatic re-holds stop once we are past
-// 06:00 UTC on D-1. Example: slot 22nd -> cutoff 21st 06:00 UTC.
+// 12:00 UTC on D-1. Example: slot 22nd -> cutoff 21st 12:00 UTC.
 // Manual Add / Verify / Remove are NOT blocked — only the scheduler's auto
 // runs. Cutoff holdings park as status 'auto_stopped' (terminal for auto).
-const AUTO_CUTOFF_HOUR_UTC = Math.min(23, Math.max(0, toInt(process.env.AUTO_CUTOFF_HOUR_UTC, 6)));
+const AUTO_CUTOFF_HOUR_UTC = Math.min(23, Math.max(0, toInt(process.env.AUTO_CUTOFF_HOUR_UTC, 12)));
 function autoCutoffFor(localDate) {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(localDate || ''));
   if (!m) return null;
@@ -249,7 +249,7 @@ function applyAutoCutoff(id, holding = null) {
   }
   if (!isPastAutoCutoff(h.local_date)) return false;
   const cutoff = autoCutoffFor(h.local_date);
-  const msg = `Auto-stopped: past day-before 06:00 UTC cutoff (${cutoff}) for slot ${h.local_date}. No further auto runs — cart stays held until expiry.`;
+  const msg = `Auto-stopped: past day-before 12:00 UTC cutoff (${cutoff}) for slot ${h.local_date}. No further auto runs — cart stays held until expiry.`;
   updateHolding(id, {
     auto_enabled: 0,
     status: 'auto_stopped',
@@ -570,15 +570,15 @@ async function addInitialCart(id, source = 'manual') {
   if (['stopped', 'removed', 'remove_requested', 'removing'].includes(holding.status)) {
     throw errorWithStatus(`Holding is ${holding.status} and cannot be added.`, 409);
   }
-  // Day-before 06:00 UTC cutoff applies to automatic runs only — manual
+  // Day-before 12:00 UTC cutoff applies to automatic runs only — manual
   // Add/Retry stays allowed so the current holding logic is untouched.
   if (source === 'auto') {
     if (String(holding.status) === 'auto_stopped') {
-      throw errorWithStatus(`Holding is auto_stopped (past day-before 06:00 UTC cutoff for ${holding.local_date}) and auto runs are parked.`, 409);
+      throw errorWithStatus(`Holding is auto_stopped (past day-before 12:00 UTC cutoff for ${holding.local_date}) and auto runs are parked.`, 409);
     }
     if (isPastAutoCutoff(holding.local_date)) {
       applyAutoCutoff(id, holding);
-      throw errorWithStatus(`Auto parked: past day-before 06:00 UTC cutoff (${autoCutoffFor(holding.local_date)}) for slot ${holding.local_date}.`, 409);
+      throw errorWithStatus(`Auto parked: past day-before 12:00 UTC cutoff (${autoCutoffFor(holding.local_date)}) for slot ${holding.local_date}.`, 409);
     }
   }
   const startedAt = nowIso();
@@ -891,7 +891,7 @@ async function handleApi(req, res, url) {
       runsPerHolding: RUNS_PER_HOLDING,
       passwordProtected: Boolean(DASHBOARD_PASSWORD),
       autoCutoffHourUtc: AUTO_CUTOFF_HOUR_UTC,
-      autoCutoffNote: 'Auto re-holds stop after 06:00 UTC on the day before the slot date (e.g. slot 22nd -> cutoff 21st 06:00 UTC).',
+      autoCutoffNote: 'Auto re-holds stop after 12:00 UTC on the day before the slot date (e.g. slot 22nd -> cutoff 21st 12:00 UTC).',
     });
   }
   if (req.method === 'GET' && url.pathname === '/api/health') {
@@ -949,7 +949,7 @@ async function handleApi(req, res, url) {
           const cutoff = autoCutoffFor(String(body.date || ''));
           updateHolding(holding.id, {
             auto_enabled: 0, status: 'auto_stopped', next_run_at: null, stopped_at: nowIso(),
-            last_error: `Auto-stopped: created past day-before 06:00 UTC cutoff (${cutoff}) for slot ${body.date}. Single hold kept — no further auto runs.`,
+            last_error: `Auto-stopped: created past day-before 12:00 UTC cutoff (${cutoff}) for slot ${body.date}. Single hold kept — no further auto runs.`,
           });
           logLine(`AUTO-CUTOFF #${holding.id}: created past ${cutoff} -> auto_stopped (single hold kept)`);
           return sendJson(res, 201, { holding: getHolding(holding.id) });
@@ -968,7 +968,7 @@ async function handleApi(req, res, url) {
           try {
             updateHolding(holding.id, {
               auto_enabled: 0, status: 'auto_stopped', next_run_at: null, stopped_at: nowIso(),
-              last_error: `Auto-stopped: past day-before 06:00 UTC cutoff (${autoCutoffFor(String(body.date || ''))}) for slot ${body.date}. Last error: ${error.message}`,
+              last_error: `Auto-stopped: past day-before 12:00 UTC cutoff (${autoCutoffFor(String(body.date || ''))}) for slot ${body.date}. Last error: ${error.message}`,
             });
           } catch { /* ignore */ }
           logLine(`AUTO-CUTOFF #${holding.id}: initial failed past cutoff -> auto_stopped`);
@@ -1010,7 +1010,7 @@ async function handleApi(req, res, url) {
       const h = getHolding(id);
       if (h.status === 'removed') throw errorWithStatus('Removed holdings cannot be re-enabled.', 409);
       if (isPastAutoCutoff(h.local_date)) {
-        throw errorWithStatus(`Cannot enable auto: past day-before 06:00 UTC cutoff (${autoCutoffFor(h.local_date)}) for slot ${h.local_date}.`, 409);
+        throw errorWithStatus(`Cannot enable auto: past day-before 12:00 UTC cutoff (${autoCutoffFor(h.local_date)}) for slot ${h.local_date}.`, 409);
       }
       const body = await readJsonBody(req);
       updateHolding(id, {
@@ -1094,8 +1094,8 @@ function maybePrune() {
 async function schedulerTick() {
   lastTickAt = nowIso();
   maybePrune();
-  // Day-before 06:00 UTC sweep — runs even when automation is paused so the
-  // Auto-stopped tag appears on time (e.g. slot 22nd parks after 21st 06:00 UTC).
+  // Day-before 12:00 UTC sweep — runs even when automation is paused so the
+  // Auto-stopped tag appears on time (e.g. slot 22nd parks after 21st 12:00 UTC).
   try {
     const candidates = db.prepare(`
       SELECT id, local_date, status FROM holdings

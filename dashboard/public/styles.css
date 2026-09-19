@@ -262,7 +262,7 @@ td strong { letter-spacing: -.01em; }
 .history { font-size: 12px; color: var(--muted); }
 .countdown { color: var(--accent); font-weight: 800; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .history summary { cursor: pointer; font-weight: 700; color: var(--ink-2); }
-.next-list { display: grid; gap: 8px; margin-bottom: 12px; }
+.next-list { display: grid; gap: 8px; margin-bottom: 12px; max-height: 320px; overflow: auto; padding-right: 2px; }
 .next-row { display: flex; justify-content: space-between; gap: 10px; border: 1px solid var(--line-soft); border-radius: 10px; padding: 11px 13px; font-size: 12px; background: var(--inset); color: var(--ink-2); }
 .next-row strong { color: var(--ink); }
 

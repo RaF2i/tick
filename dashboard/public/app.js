@@ -312,7 +312,7 @@ function renderHoldings() {
     ? `Auto ON · ${liveCount} holding${liveCount === 1 ? '' : 's'}${exec ? ` · ${exec} executing` : ''}`
     : (due > 0 ? `Auto OFF · ${due} due — start auto` : 'Manual mode');
   const sorted = [...live].sort((a, b) => String(a.next_run_at || '~').localeCompare(String(b.next_run_at || '~')));
-  $('#nextUp').innerHTML = sorted.slice(0, 5).map((h) => {
+  $('#nextUp').innerHTML = sorted.map((h) => {
     const when = h.auto_enabled ? (h.next_run_at ? fmtDT(h.next_run_at) : 'scheduled') : 'manual — no runs';
     const live = h.auto_enabled && h.next_run_at && !isTerminal(h)
       ? `${I.clock}<span class="countdown" data-next="${esc(h.next_run_at)}" title="Next run ${esc(fmtDT(h.next_run_at))}">${esc(countdownText(h.next_run_at))}</span>`
@@ -432,7 +432,7 @@ function renderHoldingInto(h) {
   const terminalNote = h.status === 'removed'
     ? 'Tickets were removed — no further runs.'
     : h.status === 'auto_stopped'
-      ? 'Auto-stopped at day-before 06:00 UTC cutoff — no further auto runs. Cart stays held until expiry.'
+      ? 'Auto-stopped at day-before 12:00 UTC cutoff — no further auto runs. Cart stays held until expiry.'
       : h.status === 'stopped'
         ? 'Holding stopped — no further runs. Cart stays held upstream until expiry.'
         : null;
