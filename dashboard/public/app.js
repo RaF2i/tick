@@ -136,9 +136,18 @@ function skeletonHoldings() {
   $('#nextUp').innerHTML = `<div class="skel skel-line big"></div><div class="skel skel-line"></div>`;
 }
 
+// Past dates are locked — holdings can only start from today onwards.
+function todayStr() { return new Date().toISOString().slice(0, 10); }
+function lockDateInput() {
+  const t = todayStr();
+  dateInput.min = t;
+  if (!dateInput.value || dateInput.value < t) dateInput.value = t;
+}
 // ---- New flow: 1 date -> 2 slots ----
 async function loadAvail() {
   if (!dateInput.value) return showNotice('Pick a date first.', 'error');
+  lockDateInput();
+  if (dateInput.value < dateInput.min) return showNotice('Past dates are locked — pick today or a future date.', 'error');
   const b = $('#loadAvailability');
   setBtn(b, true, 'Checking…');
   dateInput.disabled = true;
@@ -218,6 +227,8 @@ function renderSlotChunks() {
 async function confirmSlot(e) {
   if (e.submitter?.value === 'cancel') return;
   e.preventDefault();
+  lockDateInput();
+  if (dateInput.value < dateInput.min) return showNotice('Past dates are locked — pick today or a future date.', 'error');
   const q = renderSlotChunks();
   if (!q) return;
   const btn = $('#slotConfirm');
@@ -245,13 +256,14 @@ async function confirmSlot(e) {
 }
 
 // ---- Holdings + detail dialog ----
-const TERMINAL = ['stopped', 'removed'];
+const TERMINAL = ['stopped', 'auto_stopped', 'removed'];
 const isTerminal = (h) => TERMINAL.includes(h.status);
 const activeItemsOf = (h) => (h.cartItems || []).filter((i) => i.status === 'active');
 const activeQtyOf = (h) => activeItemsOf(h).reduce((a, i) => a + Number(i.quantity || 0), 0);
 function badgeFor(status) {
   if (/manual_hold|running|scheduled/.test(status)) return 'open';
   if (/failed|partial|no_availability/.test(status)) return 'danger';
+  if (/auto_stopped/.test(status)) return 'pending';
   if (/stopped|removed/.test(status)) return 'muted';
   return 'pending';
 }
@@ -273,6 +285,7 @@ function statusLabel(status) {
     removing: 'Removing…',
     remove_failed: 'Remove failed',
     stopped: 'Stopped',
+    auto_stopped: 'Auto-stopped',
     removed: 'Removed',
   };
   return map[status] || status;
@@ -418,9 +431,11 @@ function renderHoldingInto(h) {
   const row = (k, v) => `<div class="kv"><dt>${k}</dt><dd>${v}</dd></div>`;
   const terminalNote = h.status === 'removed'
     ? 'Tickets were removed — no further runs.'
-    : h.status === 'stopped'
-      ? 'Holding stopped — no further runs. Cart stays held upstream until expiry.'
-      : null;
+    : h.status === 'auto_stopped'
+      ? 'Auto-stopped at day-before 06:00 UTC cutoff — no further auto runs. Cart stays held until expiry.'
+      : h.status === 'stopped'
+        ? 'Holding stopped — no further runs. Cart stays held upstream until expiry.'
+        : null;
   const nextRunText = isTerminal(h) ? '— (no further runs)' : (h.next_run_at ? fmtDT(h.next_run_at) : (h.auto_enabled ? 'scheduled' : '— (manual, no auto runs)'));
   const nextRunLive = (!isTerminal(h) && h.auto_enabled && h.next_run_at)
     ? ` <span class="countdown" data-next="${esc(h.next_run_at)}">${esc(countdownText(h.next_run_at))}</span>`
@@ -507,7 +522,7 @@ function renderHoldingInto(h) {
 
 function syncHoldingButtons(h) {
   const removed = h.status === 'removed';
-  const stopped = h.status === 'stopped';
+  const stopped = h.status === 'stopped' || h.status === 'auto_stopped';
   const rb = $('#holdingRefresh');
   if (rb.dataset.loading !== 'true') { rb.disabled = !h.remote_cart_id; rb.innerHTML = `${I.refresh}Refresh cart`; }
   const ab = $('#holdingAuto');
@@ -615,7 +630,7 @@ async function holdingAction(a) {
       const yes = $('#confirmYes');
       setBtn(yes, true, 'Removing…');
       try {
-        if (!['stopped', 'remove_failed'].includes(state.holding.status)) {
+        if (!['stopped', 'auto_stopped', 'remove_failed'].includes(state.holding.status)) {
           await api(`/api/holdings/${state.holding.id}/stop`, { method: 'POST', body: '{}' });
         }
         const d = await api(`/api/holdings/${state.holding.id}/remove`, { method: 'POST', body: '{}' });
@@ -698,7 +713,7 @@ async function boot(reset = true) {
       if ((location.pathname.replace(/\/$/, '') || '/') !== '/') await handleRoute();
     }
     loadLogs();
-    if (reset) dateInput.value = new Date().toISOString().slice(0, 10);
+    lockDateInput();
   } catch (e) { showNotice(e.message, 'error'); }
   finally {
     state.booted = true;
@@ -706,7 +721,8 @@ async function boot(reset = true) {
   }
 }
 
-dateInput.value = new Date().toISOString().slice(0, 10);
+lockDateInput();
+dateInput.addEventListener('change', lockDateInput);
 $('#loadAvailability').addEventListener('click', loadAvail);
 // Clear the loaded slots after tickets are in cart (resets steps 2–3, keeps the date).
 $('#clearSlots').addEventListener('click', () => {
