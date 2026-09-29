@@ -432,7 +432,7 @@ function renderHoldingInto(h) {
   const terminalNote = h.status === 'removed'
     ? 'Tickets were removed — no further runs.'
     : h.status === 'auto_stopped'
-      ? 'Auto-stopped at day-before 12:00 UTC cutoff — no further auto runs. Cart stays held until expiry.'
+      ? 'Auto-stopped at day-before 17:00 UTC cutoff — no further auto runs. Cart stays held until expiry.'
       : h.status === 'stopped'
         ? 'Holding stopped — no further runs. Cart stays held upstream until expiry.'
         : null;
