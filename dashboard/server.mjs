@@ -202,6 +202,7 @@ ensureColumn('holdings', 'run_count', 'run_count INTEGER NOT NULL DEFAULT 0');
 ensureColumn('holdings', 'auth_token', 'auth_token TEXT');
 ensureColumn('holdings', 'auth_obtained_at', 'auth_obtained_at TEXT');
 ensureColumn('holdings', 'cart_verified_at', 'cart_verified_at TEXT');
+ensureColumn('holdings', 'auto_stop_at', 'auto_stop_at TEXT');
 
 // One-time normalization: slot times stored as HH:MM gain :00 seconds.
 db.prepare(`UPDATE holdings SET local_time = local_time || ':00' WHERE local_time LIKE '__:__'`).run();
@@ -220,26 +221,93 @@ const toInt = (value, fallback = 0) => {
   return Number.isInteger(parsed) ? parsed : fallback;
 };
 
-// Day-before auto-cutoff: for a holding with slot date D (YYYY-MM-DD,
-// Europe/Madrid calendar day), automatic re-holds stop once we are past
-// 17:00 UTC on D-1. Example: slot 22nd -> cutoff 21st 17:00 UTC.
-// Manual Add / Verify / Remove are NOT blocked — only the scheduler's auto
-// runs. Cutoff holdings park as status 'auto_stopped' (terminal for auto).
-const AUTO_CUTOFF_HOUR_UTC = Math.min(23, Math.max(0, toInt(process.env.AUTO_CUTOFF_HOUR_UTC, 17)));
-function autoCutoffFor(localDate) {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(localDate || ''));
+// ---------------------------------------------------------------------------
+// Auto-stop (was "day-before cutoff"). Everything is authored in SPAIN time
+// (Europe/Madrid) and stored as an absolute UTC instant, so CEST/CET
+// switching is handled automatically.
+//   - Default: 21:00 Spain on the day BEFORE the slot date (slot 22nd ->
+//     auto stops 21st 21:00 Spain).
+//   - Per holding override: holdings.auto_stop_at (any date/time).
+//   - Manual Add / Verify / Remove are never blocked; only auto runs park,
+//     and they park as status 'auto_stopped'.
+// ---------------------------------------------------------------------------
+const APP_TZ = 'Europe/Madrid';
+const AUTO_STOP_HOUR_MADRID = Math.min(23, Math.max(0, toInt(process.env.AUTO_STOP_HOUR_MADRID, 21)));
+
+// Madrid offset (minutes) at a given instant — Intl is the only DST-safe source.
+function madridOffsetMinutes(instantMs) {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: APP_TZ, hour12: false,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  }).formatToParts(new Date(instantMs));
+  const p = {};
+  for (const part of parts) if (part.type !== 'literal') p[part.type] = part.value;
+  const asUtc = Date.UTC(Number(p.year), Number(p.month) - 1, Number(p.day), Number(p.hour) % 24, Number(p.minute), Number(p.second));
+  return Math.round((asUtc - instantMs) / 60000);
+}
+
+// Madrid wall-clock (YYYY-MM-DD + HH:MM) -> absolute UTC instant. Two passes so
+// DST switch days land on the correct side of the jump.
+function madridWallToIso(dateStr, timeStr) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateStr || ''));
+  const t = /^(\d{2}):(\d{2})/.exec(String(timeStr || ''));
+  if (!m || !t) return null;
+  const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]), hh = Number(t[1]), mi = Number(t[2]);
+  if (hh > 23 || mi > 59) return null;
+  if (Number(mo) < 1 || Number(mo) > 12 || Number(d) < 1 || Number(d) > 31) return null;
+  const wall = Date.UTC(y, mo - 1, d, hh, mi);
+  if (Number.isNaN(wall)) return null;
+  // Reject rolled-over dates (e.g. 31 Feb must not become 3 Mar).
+  const probe = new Date(wall);
+  if (probe.getUTCFullYear() !== y || probe.getUTCMonth() !== mo - 1 || probe.getUTCDate() !== d) return null;
+  let ts = wall - madridOffsetMinutes(wall) * 60000;
+  ts = wall - madridOffsetMinutes(ts) * 60000;
+  const iso = new Date(ts).toISOString();
+  return Number.isNaN(Date.parse(iso)) ? null : iso;
+}
+
+// Absolute instant -> readable Spain stamp, e.g. "21 Sep 21:00 (Madrid)".
+function madridStamp(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  const s = new Intl.DateTimeFormat('en-GB', {
+    timeZone: APP_TZ, day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false,
+  }).format(d);
+  return `${s} Spain`;
+}
+
+function dayBefore(dateStr) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateStr || ''));
   if (!m) return null;
-  const slotMidnightUtc = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
-  if (Number.isNaN(slotMidnightUtc)) return null;
-  const cutoffMs = slotMidnightUtc - 24 * 60 * 60 * 1000 + AUTO_CUTOFF_HOUR_UTC * 60 * 60 * 1000;
-  return new Date(cutoffMs).toISOString();
+  const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])) - 24 * 60 * 60 * 1000);
+  return d.toISOString().slice(0, 10);
 }
-function isPastAutoCutoff(localDate, nowMs = Date.now()) {
-  const cutoff = autoCutoffFor(localDate);
-  if (!cutoff) return false;
-  return nowMs >= Date.parse(cutoff);
+
+// Default stop for a slot date: 21:00 Spain on the previous calendar day.
+function defaultAutoStopAt(localDate) {
+  const prev = dayBefore(localDate);
+  if (!prev) return null;
+  return madridWallToIso(prev, `${String(AUTO_STOP_HOUR_MADRID).padStart(2, '0')}:00`);
 }
-function applyAutoCutoff(id, holding = null) {
+// Per holding: explicit override wins, else the default above.
+function autoStopAtFor(holding) {
+  const explicit = holding?.auto_stop_at || null;
+  if (explicit && !Number.isNaN(Date.parse(explicit))) return explicit;
+  return defaultAutoStopAt(holding?.local_date);
+}
+function isPastAutoStop(holding, nowMs = Date.now()) {
+  const at = autoStopAtFor(holding);
+  if (!at) return false;
+  return nowMs >= Date.parse(at);
+}
+function autoStopLabel(holding) {
+  const at = autoStopAtFor(holding);
+  return `${madridStamp(at)}${holding?.auto_stop_at ? '' : ' (default)'}`;
+}
+
+function applyAutoStop(id, holding = null) {
   const h = holding || db.prepare('SELECT * FROM holdings WHERE id = ?').get(id);
   if (!h) return false;
   if (!h.auto_enabled) return false;
@@ -247,20 +315,21 @@ function applyAutoCutoff(id, holding = null) {
     try { updateHolding(id, { auto_enabled: 0, next_run_at: null }); } catch { /* ignore */ }
     return true;
   }
-  if (!isPastAutoCutoff(h.local_date)) return false;
-  const cutoff = autoCutoffFor(h.local_date);
-  const msg = `Auto-stopped: past day-before 17:00 UTC cutoff (${cutoff}) for slot ${h.local_date}. No further auto runs — cart stays held until expiry.`;
+  const at = autoStopAtFor(h);
+  if (!isPastAutoStop(h)) return false;
+  const msg = `Auto-stopped: past auto-stop ${madridStamp(at)} for slot ${h.local_date}. No further auto runs — cart stays held until expiry.`;
   updateHolding(id, {
     auto_enabled: 0,
     status: 'auto_stopped',
+    auto_stop_at: at,
     next_run_at: null,
     stopped_at: nowIso(),
     last_error: msg,
   });
-  logLine(`AUTO-CUTOFF #${id}: slot ${h.local_date} past ${cutoff} -> auto_stopped`);
+  logLine(`AUTO-STOP #${id}: slot ${h.local_date} past ${madridStamp(at)} -> auto_stopped`);
   try {
     finishRun(id, {
-      trigger: 'auto-cutoff', status: 'failed', requested: Number(h.requested_quantity) || null,
+      trigger: 'auto-stop', status: 'failed', requested: Number(h.requested_quantity) || null,
       availables: null, added: 0, chunks: [], cartId: h.remote_cart_id || null,
       error: msg, expires: h.expires_at || null, started: nowIso(),
     });
@@ -466,24 +535,16 @@ async function fetchAvailability(date, holdingId = null, token = null) {
   return { date, closed: null, missing: false, day: dayInfo.day || null, timetables, tokenUsed: true };
 }
 
-function getHolding(id) {
-  const row = db.prepare('SELECT * FROM holdings WHERE id = ?').get(id);
-  if (!row) throw errorWithStatus('Holding was not found.', 404);
+// Effective auto-stop in both machine + Spain-display form so the UI never has
+// to recompute DST.
+function withAutoStop(row) {
+  const at = autoStopAtFor(row);
   return {
     ...row,
-    chunks: JSON.parse(row.chunks_json || '[]'),
-    cartItems: db.prepare('SELECT * FROM cart_items WHERE holding_id = ? ORDER BY chunk_number, id').all(id),
-    runs: db.prepare('SELECT * FROM runs WHERE holding_id = ? ORDER BY run_number DESC, id DESC LIMIT 100').all(id).map((r) => ({
-      ...r,
-      chunks: JSON.parse(r.chunks_json || '[]'),
-      itemIds: JSON.parse(r.remote_item_ids_json || '[]'),
-    })),
-  };
-}
-
-function listHoldings() {
-  return db.prepare('SELECT * FROM holdings ORDER BY created_at DESC, id DESC').all().map((row) => ({
-    ...row,
+    auto_stop_at: row.auto_stop_at || null,
+    auto_stop_effective: at,
+    auto_stop_madrid: madridStamp(at),
+    auto_stop_is_default: !row.auto_stop_at,
     chunks: JSON.parse(row.chunks_json || '[]'),
     cartItems: db.prepare('SELECT * FROM cart_items WHERE holding_id = ? ORDER BY chunk_number, id').all(row.id),
     runs: db.prepare('SELECT * FROM runs WHERE holding_id = ? ORDER BY run_number DESC, id DESC LIMIT 100').all(row.id).map((r) => ({
@@ -491,7 +552,17 @@ function listHoldings() {
       chunks: JSON.parse(r.chunks_json || '[]'),
       itemIds: JSON.parse(r.remote_item_ids_json || '[]'),
     })),
-  }));
+  };
+}
+
+function getHolding(id) {
+  const row = db.prepare('SELECT * FROM holdings WHERE id = ?').get(id);
+  if (!row) throw errorWithStatus('Holding was not found.', 404);
+  return withAutoStop(row);
+}
+
+function listHoldings() {
+  return db.prepare('SELECT * FROM holdings ORDER BY created_at DESC, id DESC').all().map(withAutoStop);
 }
 
 // Every add attempt (success or fail) gets its own history row — the dialog
@@ -557,11 +628,17 @@ async function createHolding(body) {
 
   const timestamp = nowIso();
   const chunks = chunksFor(quantity);
+  // Optional per-holding auto stop, sent as SPAIN wall-clock date + time.
+  let autoStopAt = null;
+  if (body.autoStopDate || body.autoStopTime) {
+    autoStopAt = madridWallToIso(String(body.autoStopDate || ''), String(body.autoStopTime || ''));
+    if (!autoStopAt) throw errorWithStatus('Auto stop needs a valid Spain date (YYYY-MM-DD) and time (HH:MM).', 400);
+  }
   const result = db.prepare(`
     INSERT INTO holdings
-      (local_date, local_time, timetable_id, ticket_id, requested_quantity, chunks_json, status, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, ?)
-  `).run(date, timeStored, timetableId, ticketId, quantity, JSON.stringify(chunks), timestamp, timestamp);
+      (local_date, local_time, timetable_id, ticket_id, requested_quantity, chunks_json, status, auto_stop_at, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?)
+  `).run(date, timeStored, timetableId, ticketId, quantity, JSON.stringify(chunks), autoStopAt, timestamp, timestamp);
   return getHolding(Number(result.lastInsertRowid));
 }
 
@@ -570,15 +647,15 @@ async function addInitialCart(id, source = 'manual') {
   if (['stopped', 'removed', 'remove_requested', 'removing'].includes(holding.status)) {
     throw errorWithStatus(`Holding is ${holding.status} and cannot be added.`, 409);
   }
-  // Day-before 17:00 UTC cutoff applies to automatic runs only — manual
-  // Add/Retry stays allowed so the current holding logic is untouched.
+  // Auto-stop applies to automatic runs only — manual Add/Retry stays allowed
+  // so the current holding logic is untouched.
   if (source === 'auto') {
     if (String(holding.status) === 'auto_stopped') {
-      throw errorWithStatus(`Holding is auto_stopped (past day-before 17:00 UTC cutoff for ${holding.local_date}) and auto runs are parked.`, 409);
+      throw errorWithStatus(`Holding is auto-stopped (auto stop was ${madridStamp(autoStopAtFor(holding))}) and auto runs are parked.`, 409);
     }
-    if (isPastAutoCutoff(holding.local_date)) {
-      applyAutoCutoff(id, holding);
-      throw errorWithStatus(`Auto parked: past day-before 17:00 UTC cutoff (${autoCutoffFor(holding.local_date)}) for slot ${holding.local_date}.`, 409);
+    if (isPastAutoStop(holding)) {
+      applyAutoStop(id, holding);
+      throw errorWithStatus(`Auto parked: past auto stop ${madridStamp(autoStopAtFor(holding))} for slot ${holding.local_date}.`, 409);
     }
   }
   const startedAt = nowIso();
@@ -882,7 +959,8 @@ async function handleApi(req, res, url) {
       visitId: VISIT_ID,
       tourId: TOUR_ID,
       defaultTicketId: DEFAULT_TICKET_ID,
-      timezone: 'Europe/Madrid',
+      timezone: APP_TZ,
+      timezoneLabel: 'Spain (Europe/Madrid)',
       tickIntervalMs: TICK_INTERVAL_MS,
       rebuyLeadSec: REBUY_LEAD_SEC,
       defaultRepeatMinutes: DEFAULT_REPEAT_MINUTES,
@@ -890,8 +968,8 @@ async function handleApi(req, res, url) {
       retentionDays: LOG_RETENTION_DAYS,
       runsPerHolding: RUNS_PER_HOLDING,
       passwordProtected: Boolean(DASHBOARD_PASSWORD),
-      autoCutoffHourUtc: AUTO_CUTOFF_HOUR_UTC,
-      autoCutoffNote: 'Auto re-holds stop after 17:00 UTC on the day before the slot date (e.g. slot 22nd -> cutoff 21st 17:00 UTC).',
+      autoStopHourMadrid: AUTO_STOP_HOUR_MADRID,
+      autoStopDefaultRule: `Auto stops at ${String(AUTO_STOP_HOUR_MADRID).padStart(2, '0')}:00 Spain on the day before the slot date (slot 22nd -> 21st 21:00 Spain).`,
     });
   }
   if (req.method === 'GET' && url.pathname === '/api/health') {
@@ -943,15 +1021,15 @@ async function handleApi(req, res, url) {
     try {
       const added = await addInitialCart(holding.id, 'initial');
       // addInitialCart sets status manual_hold + next_run_at +30m; if auto, use repeat interval instead.
-      // Day-before cutoff: keep the single manual-style hold, but park auto immediately.
+      // Auto-stop: keep the single manual-style hold, but park auto immediately.
       if (wantAuto) {
-        if (isPastAutoCutoff(String(body.date || ''))) {
-          const cutoff = autoCutoffFor(String(body.date || ''));
+        if (isPastAutoStop(getHolding(holding.id))) {
+          const at = autoStopAtFor(getHolding(holding.id));
           updateHolding(holding.id, {
-            auto_enabled: 0, status: 'auto_stopped', next_run_at: null, stopped_at: nowIso(),
-            last_error: `Auto-stopped: created past day-before 17:00 UTC cutoff (${cutoff}) for slot ${body.date}. Single hold kept — no further auto runs.`,
+            auto_enabled: 0, status: 'auto_stopped', auto_stop_at: at, next_run_at: null, stopped_at: nowIso(),
+            last_error: `Auto-stopped: created past auto stop ${madridStamp(at)} for slot ${body.date}. Single hold kept — no further auto runs.`,
           });
-          logLine(`AUTO-CUTOFF #${holding.id}: created past ${cutoff} -> auto_stopped (single hold kept)`);
+          logLine(`AUTO-STOP #${holding.id}: created past ${madridStamp(at)} -> auto_stopped (single hold kept)`);
           return sendJson(res, 201, { holding: getHolding(holding.id) });
         }
         const nextRun = new Date(Date.now() + repeatMinutes * 60 * 1000 + repeatOffsetSec * 1000).toISOString();
@@ -962,16 +1040,17 @@ async function handleApi(req, res, url) {
     } catch (error) {
       // addInitialCart already stored status (no_availability/failed/partial) + last_error.
       // For auto holdings, schedule a retry instead of leaving next_run_at in the past —
-      // unless the day-before cutoff already passed, in which case park as auto_stopped.
+      // unless the auto stop already passed, in which case park as auto_stopped.
       if (wantAuto) {
-        if (isPastAutoCutoff(String(body.date || ''))) {
+        if (isPastAutoStop(getHolding(holding.id))) {
+          const at = autoStopAtFor(getHolding(holding.id));
           try {
             updateHolding(holding.id, {
-              auto_enabled: 0, status: 'auto_stopped', next_run_at: null, stopped_at: nowIso(),
-              last_error: `Auto-stopped: past day-before 17:00 UTC cutoff (${autoCutoffFor(String(body.date || ''))}) for slot ${body.date}. Last error: ${error.message}`,
+              auto_enabled: 0, status: 'auto_stopped', auto_stop_at: at, next_run_at: null, stopped_at: nowIso(),
+              last_error: `Auto-stopped: past auto stop ${madridStamp(at)} for slot ${body.date}. Last error: ${error.message}`,
             });
           } catch { /* ignore */ }
-          logLine(`AUTO-CUTOFF #${holding.id}: initial failed past cutoff -> auto_stopped`);
+          logLine(`AUTO-STOP #${holding.id}: initial failed past ${madridStamp(at)} -> auto_stopped`);
         } else {
           const delaySec = /NO_CAPACITY|FULLY|already_booked|closed|time_not_found|date_not_found|HTTP 40[39]|No tickets/i.test(error.message || '')
             ? RETRY_BOOKED_SEC
@@ -1009,8 +1088,8 @@ async function handleApi(req, res, url) {
     if (req.method === 'POST' && segments[3] === 'enable-auto') {
       const h = getHolding(id);
       if (h.status === 'removed') throw errorWithStatus('Removed holdings cannot be re-enabled.', 409);
-      if (isPastAutoCutoff(h.local_date)) {
-        throw errorWithStatus(`Cannot enable auto: past day-before 17:00 UTC cutoff (${autoCutoffFor(h.local_date)}) for slot ${h.local_date}.`, 409);
+      if (isPastAutoStop(h)) {
+        throw errorWithStatus(`Cannot enable auto: past auto stop ${madridStamp(autoStopAtFor(h))} for slot ${h.local_date}. Change the auto stop first, or Add to cart manually.`, 409);
       }
       const body = await readJsonBody(req);
       updateHolding(id, {
@@ -1028,6 +1107,28 @@ async function handleApi(req, res, url) {
     if (req.method === 'POST' && segments[3] === 'disable-auto') {
       updateHolding(id, { auto_enabled: 0, next_run_at: null });
       logLine(`HOLDING #${id}: auto disabled`);
+      return sendJson(res, 200, { holding: getHolding(id) });
+    }
+    if (req.method === 'POST' && segments[3] === 'auto-stop') {
+      // Edit the auto stop at any time, on a running or parked holding.
+      // Spain wall-clock in, absolute instant stored. { reset: true } clears
+      // the override and falls back to the global default rule.
+      const target = getHolding(id);
+      if (target.status === 'removed') throw errorWithStatus('Removed holdings cannot change the auto stop.', 409);
+      const body = await readJsonBody(req);
+      if (body.reset) {
+        updateHolding(id, { auto_stop_at: null });
+        logLine(`HOLDING #${id}: auto stop reset to default -> ${madridStamp(defaultAutoStopAt(target.local_date))}`);
+        return sendJson(res, 200, { holding: getHolding(id) });
+      }
+      const at = madridWallToIso(String(body.autoStopDate || ''), String(body.autoStopTime || ''));
+      if (!at) throw errorWithStatus('Auto stop needs a valid Spain date (YYYY-MM-DD) and time (HH:MM).', 400);
+      const past = Date.now() >= Date.parse(at);
+      updateHolding(id, {
+        auto_stop_at: at,
+        ...(past ? { auto_enabled: 0, status: 'auto_stopped', next_run_at: null, stopped_at: nowIso() } : {}),
+      });
+      logLine(`HOLDING #${id}: auto stop set to ${madridStamp(at)}${past ? ' (already past -> parked)' : ''}`);
       return sendJson(res, 200, { holding: getHolding(id) });
     }
     if (req.method === 'POST' && segments[3] === 'stop') {
@@ -1094,18 +1195,18 @@ function maybePrune() {
 async function schedulerTick() {
   lastTickAt = nowIso();
   maybePrune();
-  // Day-before 17:00 UTC sweep — runs even when automation is paused so the
-  // Auto-stopped tag appears on time (e.g. slot 22nd parks after 21st 17:00 UTC).
+  // Auto-stop sweep — runs even when automation is paused so the Auto-stopped
+  // tag appears on time (e.g. slot 22nd parks after 21st 21:00 Spain).
   try {
     const candidates = db.prepare(`
-      SELECT id, local_date, status FROM holdings
+      SELECT id, local_date, status, auto_stop_at FROM holdings
       WHERE auto_enabled = 1 AND status NOT IN ('stopped','auto_stopped','removed','removing')
     `).all();
     for (const c of candidates) {
-      if (isPastAutoCutoff(c.local_date)) applyAutoCutoff(c.id, c);
+      if (isPastAutoStop(c)) applyAutoStop(c.id, c);
     }
   } catch (e) {
-    logLine(`AUTO-CUTOFF sweep fail: ${e.message}`);
+    logLine(`AUTO-STOP sweep fail: ${e.message}`);
   }
   if (!AUTOMATION_ENABLED) {
     lastTickResult = 'automation disabled - skipping';
@@ -1280,11 +1381,13 @@ server.listen(PORT, () => {
   logLine(`START automation=${AUTOMATION_ENABLED} tick=${TICK_INTERVAL_MS}ms append=${ALLOW_CART_APPEND} repeat=${DEFAULT_REPEAT_MINUTES}m+${DEFAULT_REPEAT_OFFSET_SEC}s rebuyLead=${REBUY_LEAD_SEC}s`);
   if (!API_KEY) logLine('WARN: SERVITICKETS_API_KEY is missing — set it in dashboard/.env');
   logLine(`START web password=${DASHBOARD_PASSWORD ? 'ON' : 'OFF'}`);
+  logLine(`START auto stop default ${String(AUTO_STOP_HOUR_MADRID).padStart(2, '0')}:00 ${APP_TZ} day-before (per-holding editable)`);
   console.log(`Ticket dashboard: http://localhost:${PORT}`);
   console.log(`SQLite database: ${DB_PATH}`);
   console.log(`Automation enabled: ${AUTOMATION_ENABLED} (tick ${TICK_INTERVAL_MS}ms)`);
   console.log(`Cart append enabled: ${ALLOW_CART_APPEND}`);
   console.log(`Repeat default: ${DEFAULT_REPEAT_MINUTES}m + ${DEFAULT_REPEAT_OFFSET_SEC}s | rebuy lead ${REBUY_LEAD_SEC}s`);
+  console.log(`Auto stop: ${String(AUTO_STOP_HOUR_MADRID).padStart(2, '0')}:00 ${APP_TZ} on the day before the slot date (editable per holding)`);
   console.log(`Log file: ${LOG_DIR}`);
 });
 

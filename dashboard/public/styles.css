@@ -263,6 +263,14 @@ td strong { letter-spacing: -.01em; }
 .countdown { color: var(--accent); font-weight: 800; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .history summary { cursor: pointer; font-weight: 700; color: var(--ink-2); }
 .next-list { display: grid; gap: 8px; margin-bottom: 12px; max-height: 320px; overflow: auto; padding-right: 2px; }
+/* Auto-stop picker (Spain time) in the confirm dialog + holding detail */
+.stop-block { display: grid; gap: 6px; margin-top: 10px; padding: 11px 12px; border: 1px solid var(--line-soft); border-radius: 10px; background: rgba(255,255,255,.014); }
+.stop-block.disabled { opacity: .5; }
+.stop-label { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.stop-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.stop-row input[type="date"] { flex: 1 1 150px; min-width: 0; }
+.stop-row input[type="time"] { flex: 0 0 110px; }
+.stop-row .table-action { flex: none; }
 .next-row { display: flex; justify-content: space-between; gap: 10px; border: 1px solid var(--line-soft); border-radius: 10px; padding: 11px 13px; font-size: 12px; background: var(--inset); color: var(--ink-2); }
 .next-row strong { color: var(--ink); }
 

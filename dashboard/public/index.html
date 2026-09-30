@@ -20,7 +20,7 @@
 
     <header class="topbar sticky-bar">
       <div class="brand"><span class="brand-mark"><svg viewBox="0 0 24 24" fill="none" stroke="#1C274C" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="Ticket Control logo"><path d="M2 9a3 3 0 0 1 0 6v2a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-2a3 3 0 0 1 0-6V7a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2Z"/><path d="M13 5v2"/><path d="M13 11v2"/><path d="M13 17v2"/></svg></span><div><strong>Ticket Control</strong><span>SEVILLA · OPERATIONS CONSOLE</span></div></div>
-      <div class="topbar-meta"><span class="status-line" id="sideStatus">Checking…</span><span class="pill" id="autoPill">Auto: …</span><button id="autoToggle" class="button button-secondary" type="button">Start auto</button><button id="logoutBtn" class="button button-ghost button-small hidden" type="button" title="Log out"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>Logout</button></div>
+      <div class="topbar-meta"><span class="status-line" id="sideStatus">Checking…</span><span class="pill" id="tzPill" title="All times are shown in Spain (Europe/Madrid)">Times: Spain</span><span class="pill" id="autoPill">Auto: …</span><button id="autoToggle" class="button button-secondary" type="button">Start auto</button><button id="logoutBtn" class="button button-ghost button-small hidden" type="button" title="Log out"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>Logout</button></div>
     </header>
 
     <div id="listView">
@@ -86,6 +86,15 @@
     <p class="dialog-error hidden" id="slotError"></p>
     <label class="check"><input id="slotAuto" type="checkbox" checked><span>Auto re-add after</span></label>
     <div class="auto-row"><input id="slotRepeat" type="number" min="1" max="1440" value="30"><span>minutes</span><span class="field-hint">Re-runs automatically until stopped.</span></div>
+    <div class="stop-block">
+      <span class="stop-label">Auto stop at — Spain time (Europe/Madrid)</span>
+      <div class="stop-row">
+        <input id="slotStopDate" type="date" aria-label="Auto stop date (Spain)">
+        <input id="slotStopTime" type="time" value="21:00" aria-label="Auto stop time (Spain)">
+        <button id="slotStopDefault" class="table-action" type="button" title="Reset to the default rule">Default</button>
+      </div>
+      <span class="field-hint" id="slotStopHint">Auto re-add stops at this moment and the holding is tagged <strong>Auto-stopped</strong>. Editable later from the holding page.</span>
+    </div>
     <div class="dialog-actions">
       <button value="cancel" class="button button-ghost" type="submit">Cancel</button>
       <button id="slotConfirm" value="default" class="button button-primary" type="submit"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 9a3 3 0 0 1 0 6v2a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-2a3 3 0 0 1 0-6V7a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2Z"/><path d="M13 5v2"/><path d="M13 11v2"/><path d="M13 17v2"/></svg>Add to cart</button>

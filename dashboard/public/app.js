@@ -5,6 +5,7 @@ const $ = (s) => document.querySelector(s);
 const dateInput = $('#dateInput');
 const slotGrid = $('#slotGrid'), slotState = $('#slotState');
 const slotDialog = $('#slotDialog'), slotQty = $('#slotQty'), slotAuto = $('#slotAuto'), slotRepeat = $('#slotRepeat');
+const slotStopDate = $('#slotStopDate'), slotStopTime = $('#slotStopTime');
 const holdingPage = $('#holdingPage'), listView = $('#listView');
 const confirmDialog = $('#confirmDialog');
 
@@ -84,9 +85,46 @@ function setBtn(btn, loading, loadingText) {
 }
 
 function chunksFor(q) { const c = []; let x = Math.max(0, Math.floor(Number(q) || 0)); while (x > 0) { c.push(Math.min(30, x)); x -= Math.min(30, x); } return c; }
+
+// All times are shown in Spain (Europe/Madrid) regardless of the viewer's
+// device timezone — the venue and the cutoff rules are Spanish.
+const TZ = 'Europe/Madrid';
+const TZ_SHORT = 'Spain';
 function fmtD(d) { if (!d) return '—'; return new Intl.DateTimeFormat('en-GB', { day: '2-digit', month: 'short' }).format(new Date(d + 'T12:00:00')); }
-function fmtDT(v) { if (!v) return '—'; const d = new Date(v); return isNaN(d) ? v : new Intl.DateTimeFormat('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(d); }
+function fmtDT(v) {
+  if (!v) return '—';
+  const d = new Date(v);
+  if (isNaN(d)) return v;
+  return new Intl.DateTimeFormat('en-GB', { timeZone: TZ, day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(d);
+}
+// ISO instant -> { date: 'YYYY-MM-DD', time: 'HH:MM' } in Spain wall clock.
+function madridParts(v) {
+  if (!v) return null;
+  const d = new Date(v);
+  if (isNaN(d)) return null;
+  const p = new Intl.DateTimeFormat('en-CA', { timeZone: TZ, hour12: false, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).formatToParts(d);
+  const o = {};
+  for (const x of p) if (x.type !== 'literal') o[x.type] = x.value;
+  return { date: `${o.year}-${o.month}-${o.day}`, time: `${o.hour}:${o.minute}` };
+}
+function dayBeforeStr(dateStr) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateStr || ''));
+  if (!m) return '';
+  return new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])) - 86400000).toISOString().slice(0, 10);
+}
 function fmtT(t) { if (!t) return '—'; return /^\d{2}:\d{2}$/.test(t) ? `${t}:00` : t; }
+
+// Server log lines start with a UTC ISO stamp — render it in Spain time.
+function localizeLogLine(line) {
+  return String(line ?? '').replace(
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/,
+    (m) => {
+      const d = new Date(m);
+      if (isNaN(d)) return m;
+      return new Intl.DateTimeFormat('en-GB', { timeZone: TZ, day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(d);
+    },
+  );
+}
 
 // Live countdown text for a next_run_at timestamp
 function countdownText(iso) {
@@ -200,11 +238,42 @@ function openSlotDialog(slot) {
   slotAuto.checked = true;
   slotRepeat.disabled = false;
   slotRepeat.value = state.config?.defaultRepeatMinutes || 30;
+  // Auto stop defaults to 21:00 Spain on the day before the slot date.
+  setDefaultStopInputs();
+  syncStopInputs();
   $('#slotError').classList.add('hidden');
   renderSlotChunks();
   $('#step3').classList.add('active');
   if (!slotDialog.open) slotDialog.showModal();
   setTimeout(() => slotQty.focus(), 50);
+}
+
+function defaultStopHour() {
+  const h = Number(state.config?.autoStopHourMadrid);
+  return String(Number.isInteger(h) && h >= 0 && h <= 23 ? h : 21).padStart(2, '0');
+}
+function setDefaultStopInputs() {
+  const date = dayBeforeStr(dateInput.value);
+  $('#slotStopDate').value = date;
+  $('#slotStopTime').value = `${defaultStopHour()}:00`;
+  updateStopHint();
+}
+function updateStopHint() {
+  const d = $('#slotStopDate').value, t = $('#slotStopTime').value;
+  const hint = $('#slotStopHint');
+  if (!d || !t) { hint.textContent = 'Pick a Spain date + time for the auto stop.'; return; }
+  const past = new Date(`${d}T${t}:00Z`).getTime() <= Date.now();
+  hint.innerHTML = past
+    ? `<span class="error-text">${esc(d)} ${esc(t)} Spain is in the past — auto will park immediately as Auto-stopped.</span>`
+    : `Auto re-add stops <strong>${esc(d)} at ${esc(t)} Spain</strong> and the holding is tagged <strong>Auto-stopped</strong>. Editable later from the holding page.`;
+}
+function syncStopInputs() {
+  const on = slotAuto.checked;
+  $('#slotStopDate').disabled = !on;
+  $('#slotStopTime').disabled = !on;
+  $('#slotStopDefault').disabled = !on;
+  $('#slotStopDate').closest('.stop-block').classList.toggle('disabled', !on);
+  updateStopHint();
 }
 
 function renderSlotChunks() {
@@ -231,6 +300,13 @@ async function confirmSlot(e) {
   if (dateInput.value < dateInput.min) return showNotice('Past dates are locked — pick today or a future date.', 'error');
   const q = renderSlotChunks();
   if (!q) return;
+  const stopDate = slotStopDate.value, stopTime = slotStopTime.value;
+  if (slotAuto.checked && (!stopDate || !stopTime)) {
+    const el = $('#slotError');
+    el.textContent = 'Pick the Spain date + time for the auto stop (or turn auto off).';
+    el.classList.remove('hidden');
+    return;
+  }
   const btn = $('#slotConfirm');
   const card = $('#slotForm');
   setBtn(btn, true, 'Adding…');
@@ -242,12 +318,15 @@ async function confirmSlot(e) {
         date: dateInput.value, time: state.slot.start, timetableId: state.slot.id,
         ticketId: state.config?.defaultTicketId || 34, quantity: q,
         autoEnabled: slotAuto.checked, repeatMinutes: Number(slotRepeat.value) || 30,
+        autoStopDate: slotAuto.checked ? stopDate : null,
+        autoStopTime: slotAuto.checked ? stopTime : null,
       }),
     });
     slotDialog.close();
     const h = d.holding;
     const inCart = (h.cartItems || []).reduce((a, i) => a + Number(i.quantity || 0), 0);
-    showNotice(`Added ${inCart || q} tickets to cart ${h.remote_cart_id ? h.remote_cart_id.slice(0, 8) + '…' : ''}${slotAuto.checked ? ' + auto re-add ON' : ''}.`, 'success');
+    const stopTxt = slotAuto.checked ? ` Auto stops ${h.auto_stop_madrid}.` : '';
+    showNotice(`Added ${inCart || q} tickets to cart ${h.remote_cart_id ? h.remote_cart_id.slice(0, 8) + '…' : ''}${slotAuto.checked ? ' + auto re-add ON' : ''}.${stopTxt}`, 'success');
     await loadHoldings({ silent: true });
   } catch (err) {
     const el = $('#slotError'); el.textContent = err.message; el.classList.remove('hidden');
@@ -313,11 +392,11 @@ function renderHoldings() {
     : (due > 0 ? `Auto OFF · ${due} due — start auto` : 'Manual mode');
   const sorted = [...live].sort((a, b) => String(a.next_run_at || '~').localeCompare(String(b.next_run_at || '~')));
   $('#nextUp').innerHTML = sorted.map((h) => {
-    const when = h.auto_enabled ? (h.next_run_at ? fmtDT(h.next_run_at) : 'scheduled') : 'manual — no runs';
+    const when = h.auto_enabled ? (h.next_run_at ? `${fmtDT(h.next_run_at)} ${TZ_SHORT}` : 'scheduled') : 'manual — no runs';
     const live = h.auto_enabled && h.next_run_at && !isTerminal(h)
-      ? `${I.clock}<span class="countdown" data-next="${esc(h.next_run_at)}" title="Next run ${esc(fmtDT(h.next_run_at))}">${esc(countdownText(h.next_run_at))}</span>`
+      ? `${I.clock}<span class="countdown" data-next="${esc(h.next_run_at)}" title="Next run ${esc(fmtDT(h.next_run_at))} ${TZ_SHORT}">${esc(countdownText(h.next_run_at))}</span>`
       : '';
-    return `<div class="next-row"><strong>${esc(h.local_date)} ${esc(h.local_time)}</strong><span>OccID ${h.timetable_id} · ${esc(statusLabel(h.status))} · ${esc(modeLabel(h))}</span><span class="mono">${when}${live ? ` · ${live}` : ''}</span></div>`;
+    return `<div class="next-row"><strong>${esc(h.local_date)} ${esc(h.local_time)}</strong><span>OccID ${h.timetable_id} · ${esc(statusLabel(h.status))} · ${esc(modeLabel(h))}</span><span class="mono">${when}${live ? ` · ${live}` : ''} · stop ${esc(h.auto_stop_madrid || '—')}</span></div>`;
   }).join('') || `<div class="empty-preview">${state.holdings.length ? 'No active holdings.' : 'No holdings yet — pick a date above to start.'}</div>`;
   const body = $('#holdingsTable tbody');
   body.innerHTML = state.holdings.length ? state.holdings.map((h) => {
@@ -325,7 +404,7 @@ function renderHoldings() {
     const sub = isTerminal(h)
       ? `OccID ${h.timetable_id} · was ${h.requested_quantity} wanted · ${esc(statusLabel(h.status))}`
       : `OccID ${h.timetable_id} · want ${h.requested_quantity} · in cart ${added} · ${esc(modeLabel(h))}`;
-    return `<tr><td><strong>${fmtD(h.local_date)} ${esc(h.local_time)}</strong><span class="sub-cell">${sub}</span></td>
+    return `<tr><td><strong>${fmtD(h.local_date)} ${esc(h.local_time)}</strong><span class="sub-cell">${sub}</span><span class="sub-cell">Auto stop ${esc(h.auto_stop_madrid || '—')}</span></td>
       <td><span class="status-badge status-${badgeFor(h.status)}">${esc(statusLabel(h.status))}</span></td>
       <td class="actions-cell"><button class="table-action" data-view="${h.id}">${I.eye}View</button>${h.status === 'removed' ? `<button class="table-action icon-only danger" data-purge="${h.id}" type="button" title="Delete permanently" aria-label="Delete holding #${h.id} permanently">${I.x}</button>` : ''}</td></tr>`;
   }).join('') : '<tr><td colspan="3" class="empty-cell">No holdings yet.</td></tr>';
@@ -432,14 +511,17 @@ function renderHoldingInto(h) {
   const terminalNote = h.status === 'removed'
     ? 'Tickets were removed — no further runs.'
     : h.status === 'auto_stopped'
-      ? 'Auto-stopped at day-before 17:00 UTC cutoff — no further auto runs. Cart stays held until expiry.'
+      ? `Auto-stopped at ${h.auto_stop_madrid} — no further auto runs. Cart stays held until expiry.`
       : h.status === 'stopped'
         ? 'Holding stopped — no further runs. Cart stays held upstream until expiry.'
         : null;
-  const nextRunText = isTerminal(h) ? '— (no further runs)' : (h.next_run_at ? fmtDT(h.next_run_at) : (h.auto_enabled ? 'scheduled' : '— (manual, no auto runs)'));
+  const nextRunText = isTerminal(h) ? '— (no further runs)' : (h.next_run_at ? `${fmtDT(h.next_run_at)} ${TZ_SHORT}` : (h.auto_enabled ? 'scheduled' : '— (manual, no auto runs)'));
   const nextRunLive = (!isTerminal(h) && h.auto_enabled && h.next_run_at)
     ? ` <span class="countdown" data-next="${esc(h.next_run_at)}">${esc(countdownText(h.next_run_at))}</span>`
     : '';
+  const stopParts = madridParts(h.auto_stop_effective);
+  const stopEditable = h.status !== 'removed';
+  const stopDisabled = stopEditable ? '' : 'disabled';
   const cartNote = !h.remote_cart_id
     ? (h.status === 'removed' ? 'No cart held.' : h.status === 'stopped' ? 'No cart reference.' : 'No cart yet.')
     : (h.status === 'stopped' ? 'Cart stays held upstream until expiry.' : '');
@@ -455,12 +537,23 @@ function renderHoldingInto(h) {
         ${row('State', `<span class="status-badge status-${badgeFor(h.status)}">${esc(statusLabel(h.status))}</span>`)}
         ${row('Mode', h.auto_enabled ? `<span class="status-badge status-pending">AUTO · every ${h.repeat_minutes}m</span>` : '<span class="status-badge status-muted">Manual</span>')}
         ${row('Slot', `${esc(h.local_date)} ${esc(fmtT(h.local_time))} · OccID ${h.timetable_id} · ticket ${h.ticket_id}`)}
+        ${row('Auto stop', `${esc(h.auto_stop_madrid)} <span class="sub-cell">${h.auto_stop_is_default ? 'default rule' : 'custom'}</span>`)}
         ${row('Wanted / in cart', `${h.requested_quantity} / ${inCart}${h.planned_quantity ? ` (planned ${h.planned_quantity})` : ''}`)}
         ${row('Chunks', chunks.length ? `<span class="mono">[${chunks.join(' + ')}]</span>` : '—')}
         ${row('Total', h.price_total != null ? `${h.price_total} ${esc(h.currency || 'EUR')}` : '—')}
         ${row('Next run', `${esc(nextRunText)}${nextRunLive}`)}
         ${h.last_error ? row('Error', `<span class="error-text">${esc(h.last_error)}</span>`) : ''}
       </dl>
+      <div class="stop-block" id="holdingStopBlock">
+        <span class="stop-label">${I.clock}Auto stop — Spain time</span>
+        <div class="stop-row">
+          <input id="holdStopDate" type="date" value="${esc(stopParts?.date || '')}" ${stopDisabled} aria-label="Auto stop date (Spain)">
+          <input id="holdStopTime" type="time" value="${esc(stopParts?.time || '')}" ${stopDisabled} aria-label="Auto stop time (Spain)">
+          <button class="table-action" id="holdStopSave" type="button" ${stopDisabled}>Save</button>
+          <button class="table-action" id="holdStopReset" type="button" ${h.auto_stop_is_default || !stopEditable ? 'disabled' : ''}>Use default</button>
+        </div>
+        <span class="field-hint" id="holdStopHint">${esc(state.config?.autoStopDefaultRule || `Auto stops at ${defaultStopHour()}:00 Spain the day before the slot date.`)}${h.status === 'auto_stopped' ? ' Move the stop later and press Auto to resume.' : ''}</span>
+      </div>
     </div>
 
     <div class="detail-section">
@@ -686,7 +779,7 @@ async function loadLogs() {
   setBtn(b, true, 'Loading…');
   try {
     const d = await api('/api/logs?limit=150');
-    $('#logsPre').textContent = (d.lines || []).join('\n') || 'Log is empty so far.';
+    $('#logsPre').textContent = (d.lines || []).map(localizeLogLine).join('\n') || 'Log is empty so far.';
   } catch (e) { $('#logsPre').textContent = e.message; }
   finally { setBtn(b, false); }
 }
@@ -706,6 +799,7 @@ async function boot(reset = true) {
   try {
     state.config = await api('/api/config');
     $('#configPre').textContent = JSON.stringify(state.config, null, 2);
+    $('#tzPill').textContent = `Times: ${state.config?.timezoneLabel || 'Spain (Europe/Madrid)'}`;
     if (state.config?.passwordProtected) $('#logoutBtn')?.classList.remove('hidden');
     await loadHoldings({ force: !state.booted });
     if (!routeResolved) {
@@ -739,7 +833,10 @@ slotGrid.addEventListener('click', (e) => {
   if (!b || b.disabled) return; const s = state.slots.find((x) => x.id === Number(b.dataset.slot)); if (s) openSlotDialog(s);
 });
 slotQty.addEventListener('input', renderSlotChunks);
-slotAuto.addEventListener('change', () => { slotRepeat.disabled = !slotAuto.checked; });
+slotAuto.addEventListener('change', syncStopInputs);
+slotStopDate.addEventListener('change', updateStopHint);
+slotStopTime.addEventListener('change', updateStopHint);
+$('#slotStopDefault').addEventListener('click', setDefaultStopInputs);
 $('#slotForm').addEventListener('submit', confirmSlot);
 slotDialog.addEventListener('close', () => { $('#slotForm').dataset.busy = 'false'; const b = $('#slotConfirm'); if (b.dataset.loading === 'true') setBtn(b, false); b.innerHTML = `${I.ticket}Add to cart`; });
 $('#holdingsTable tbody').addEventListener('click', async (e) => {
@@ -778,8 +875,33 @@ $('#holdingBody').addEventListener('click', (e) => {
     const showing = btn.textContent.trim() === 'Hide';
     box.textContent = showing ? tokenShort(h.auth_token) : h.auth_token;
     btn.innerHTML = showing ? `${I.eye}Show` : `${I.eye}Hide`;
+    return;
   }
+  if (e.target.closest('#holdStopSave')) { saveHoldingAutoStop(false); return; }
+  if (e.target.closest('#holdStopReset')) { saveHoldingAutoStop(true); return; }
 });
+
+// Auto stop is editable at any time (running or parked). Spain wall clock in.
+async function saveHoldingAutoStop(reset) {
+  const h = state.holding;
+  if (!h) return;
+  const btn = reset ? $('#holdStopReset') : $('#holdStopSave');
+  holdingError(null);
+  if (!reset) {
+    const d = $('#holdStopDate')?.value, t = $('#holdStopTime')?.value;
+    if (!d || !t) return holdingError('Pick a Spain date + time for the auto stop.');
+  }
+  setBtn(btn, true, 'Saving…');
+  try {
+    const body = reset ? { reset: true } : { autoStopDate: $('#holdStopDate').value, autoStopTime: $('#holdStopTime').value };
+    const d = await api(`/api/holdings/${h.id}/auto-stop`, { method: 'POST', body: JSON.stringify(body) });
+    state.holding = d.holding;
+    renderHoldingInto(d.holding);
+    await loadHoldings({ silent: true });
+    showNotice(`Auto stop set to ${d.holding.auto_stop_madrid}${d.holding.status === 'auto_stopped' ? ' — already past, holding parked.' : '.'}`, d.holding.status === 'auto_stopped' ? 'info' : 'success');
+  } catch (e) { holdingError(e.message); }
+  finally { setBtn(btn, false); }
+}
 $('#holdingStop').addEventListener('click', () => holdingAction('stop'));
 $('#holdingRemove').addEventListener('click', () => holdingAction('remove'));
 $('#holdingBack').addEventListener('click', () => { closeHolding(); loadHoldings({ silent: true }); });
