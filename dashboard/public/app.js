@@ -126,6 +126,68 @@ function localizeLogLine(line) {
   );
 }
 
+// Native date/time inputs render in the *browser's* locale (US 10/09/2026,
+// 09:00 PM), which is ambiguous. Everything below spells the moment out in
+// plain European form so the auto stop is never misread.
+const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+function fmtDateLong(dateStr) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateStr || ''));
+  if (!m) return '—';
+  const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
+  if (Number.isNaN(d.getTime())) return '—';
+  return `${WEEKDAYS[d.getUTCDay()]} ${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+}
+// Mirror of the server's Madrid wall-clock -> instant conversion (DST-safe).
+function madridOffsetMinutes(instantMs) {
+  const p = new Intl.DateTimeFormat('en-GB', {
+    timeZone: TZ, hour12: false,
+    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
+  }).formatToParts(new Date(instantMs));
+  const o = {};
+  for (const x of p) if (x.type !== 'literal') o[x.type] = x.value;
+  const asUtc = Date.UTC(Number(o.year), Number(o.month) - 1, Number(o.day), Number(o.hour) % 24, Number(o.minute), Number(o.second));
+  return Math.round((asUtc - instantMs) / 60000);
+}
+function madridWallToMs(dateStr, timeStr) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateStr || ''));
+  const t = /^(\d{2}):(\d{2})/.exec(String(timeStr || ''));
+  if (!m || !t) return NaN;
+  const wall = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(t[1]), Number(t[2]));
+  if (Number.isNaN(wall)) return NaN;
+  let ts = wall - madridOffsetMinutes(wall) * 60000;
+  return wall - madridOffsetMinutes(ts) * 60000;
+}
+function relFromNow(ms) {
+  if (!Number.isFinite(ms)) return '—';
+  const diff = ms - Date.now();
+  const past = diff <= 0;
+  let s = Math.abs(diff) / 1000;
+  const days = Math.floor(s / 86400); s -= days * 86400;
+  const hours = Math.floor(s / 3600); s -= hours * 3600;
+  const mins = Math.floor(s / 60);
+  const bits = [];
+  if (days) bits.push(`${days} day${days === 1 ? '' : 's'}`);
+  if (hours) bits.push(`${hours} h`);
+  if (!days && mins) bits.push(`${mins} min`);
+  if (!bits.length) bits.push('under a minute');
+  return past ? `${bits.join(' ')} ago` : `in ${bits.join(' ')}`;
+}
+// Single source of truth for "when does auto stop" text.
+function stopWhen(dateStr, timeStr, isDefault) {
+  const ms = madridWallToMs(dateStr, timeStr);
+  if (!Number.isFinite(ms)) return { valid: false, when: 'Pick a date and time', rel: '—', ms: NaN, past: false };
+  return {
+    valid: true,
+    ms,
+    past: ms <= Date.now(),
+    when: `${fmtDateLong(dateStr)} at ${timeStr} (Spain)`,
+    rel: relFromNow(ms),
+    tag: isDefault ? 'default rule' : 'custom',
+  };
+}
+
 // Live countdown text for a next_run_at timestamp
 function countdownText(iso) {
   if (!iso) return '—';
@@ -142,6 +204,9 @@ function countdownText(iso) {
 function tickCountdowns() {
   document.querySelectorAll('[data-next]').forEach((el) => {
     el.textContent = countdownText(el.dataset.next);
+  });
+  document.querySelectorAll('[data-stop-when]').forEach((el) => {
+    el.textContent = relFromNow(Number(el.dataset.stopWhen));
   });
 }
 
@@ -261,11 +326,11 @@ function setDefaultStopInputs() {
 function updateStopHint() {
   const d = $('#slotStopDate').value, t = $('#slotStopTime').value;
   const hint = $('#slotStopHint');
-  if (!d || !t) { hint.textContent = 'Pick a Spain date + time for the auto stop.'; return; }
-  const past = new Date(`${d}T${t}:00Z`).getTime() <= Date.now();
-  hint.innerHTML = past
-    ? `<span class="error-text">${esc(d)} ${esc(t)} Spain is in the past — auto will park immediately as Auto-stopped.</span>`
-    : `Auto re-add stops <strong>${esc(d)} at ${esc(t)} Spain</strong> and the holding is tagged <strong>Auto-stopped</strong>. Editable later from the holding page.`;
+  const info = stopWhen(d, t, false);
+  if (!info.valid) { hint.textContent = 'Pick a Spain date + time for the auto stop.'; return; }
+  hint.innerHTML = info.past
+    ? `<span class="error-text">${esc(info.when)} has already passed — auto will park immediately as Auto-stopped.</span>`
+    : `Auto re-add stops <strong>${esc(info.when)}</strong> <span class="countdown" data-stop-when="${info.ms}">${esc(info.rel)}</span> and the holding is tagged <strong>Auto-stopped</strong>. Editable later from the holding page.`;
 }
 function syncStopInputs() {
   const on = slotAuto.checked;
@@ -546,13 +611,14 @@ function renderHoldingInto(h) {
       </dl>
       <div class="stop-block" id="holdingStopBlock">
         <span class="stop-label">${I.clock}Auto stop — Spain time</span>
+        <div class="stop-when" id="holdStopWhen">—</div>
         <div class="stop-row">
           <input id="holdStopDate" type="date" value="${esc(stopParts?.date || '')}" ${stopDisabled} aria-label="Auto stop date (Spain)">
           <input id="holdStopTime" type="time" value="${esc(stopParts?.time || '')}" ${stopDisabled} aria-label="Auto stop time (Spain)">
           <button class="table-action" id="holdStopSave" type="button" ${stopDisabled}>Save</button>
           <button class="table-action" id="holdStopReset" type="button" ${h.auto_stop_is_default || !stopEditable ? 'disabled' : ''}>Use default</button>
         </div>
-        <span class="field-hint" id="holdStopHint">${esc(state.config?.autoStopDefaultRule || `Auto stops at ${defaultStopHour()}:00 Spain the day before the slot date.`)}${h.status === 'auto_stopped' ? ' Move the stop later and press Auto to resume.' : ''}</span>
+        <span class="field-hint" id="holdStopHint">Slot ${esc(fmtDateLong(h.local_date))} at ${esc(fmtT(h.local_time).slice(0, 5))} — ${esc(state.config?.autoStopDefaultRule || `auto stops at ${defaultStopHour()}:00 Spain the day before`)}.</span>
       </div>
     </div>
 
@@ -611,6 +677,20 @@ function renderHoldingInto(h) {
         : '<div class="empty-preview">No runs yet for this holding.</div>'}
     </div>`;
   syncHoldingButtons(h);
+  paintStopWhen();
+}
+
+// Live readout under the date/time pickers so the moment is never ambiguous
+// (native inputs follow the browser locale, not Spain).
+function paintStopWhen() {
+  const h = state.holding;
+  const box = $('#holdStopWhen');
+  if (!h || !box) return;
+  const d = $('#holdStopDate')?.value, t = $('#holdStopTime')?.value;
+  const info = stopWhen(d, t, h.auto_stop_is_default);
+  box.classList.toggle('past', info.valid && info.past);
+  if (!info.valid) { box.innerHTML = `<strong>Pick a date and time</strong><small>Spain time</small>`; return; }
+  box.innerHTML = `<strong>${esc(info.when)}</strong><small>${esc(info.tag)} · <span class="countdown" data-stop-when="${info.ms}">${esc(info.rel)}</span></small>`;
 }
 
 function syncHoldingButtons(h) {
@@ -880,6 +960,9 @@ $('#holdingBody').addEventListener('click', (e) => {
   if (e.target.closest('#holdStopSave')) { saveHoldingAutoStop(false); return; }
   if (e.target.closest('#holdStopReset')) { saveHoldingAutoStop(true); return; }
 });
+// Keep the readout in sync while the pickers are being edited.
+$('#holdingBody').addEventListener('input', paintStopWhen);
+$('#holdingBody').addEventListener('change', paintStopWhen);
 
 // Auto stop is editable at any time (running or parked). Spain wall clock in.
 async function saveHoldingAutoStop(reset) {
