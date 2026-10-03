@@ -562,7 +562,33 @@ function getHolding(id) {
 }
 
 function listHoldings() {
-  return db.prepare('SELECT * FROM holdings ORDER BY created_at DESC, id DESC').all().map(withAutoStop);
+  return db.prepare('SELECT * FROM holdings ORDER BY created_at DESC, id DESC').all().map(withAutoStopSummary);
+}
+
+// The list view paints a 3-column summary, but withAutoStop drags every cart
+// item and run along with it — measured at 3.2 MB for 29 holdings, and the UI
+// re-polls this endpoint every 15 s. That payload starves the scheduler on a
+// small box and is what makes a fresh page load intermittently show nothing.
+//
+// So the list carries only what the summary needs: the auto-stop fields plus
+// the active-cart totals, computed with one cheap aggregate. The full cart and
+// run history stay exactly as they were on GET /api/holdings/:id.
+function withAutoStopSummary(row) {
+  const at = autoStopAtFor(row);
+  const agg = db.prepare(`
+    SELECT COUNT(*) AS active_items, COALESCE(SUM(quantity), 0) AS active_quantity
+    FROM cart_items WHERE holding_id = ? AND status = 'active'
+  `).get(row.id);
+  return {
+    ...row,
+    auto_stop_at: row.auto_stop_at || null,
+    auto_stop_effective: at,
+    auto_stop_madrid: madridStamp(at),
+    auto_stop_is_default: !row.auto_stop_at,
+    chunks: JSON.parse(row.chunks_json || '[]'),
+    active_items: Number(agg?.active_items || 0),
+    active_quantity: Number(agg?.active_quantity || 0),
+  };
 }
 
 // Every add attempt (success or fail) gets its own history row — the dialog

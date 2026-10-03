@@ -1,13 +1,44 @@
 // Same flow as auto-cart/add.js: date -> slots -> occupation -> qty -> chunks -> cart.
 // Responsive edition: skeletons, button spinners, promise confirms, silent background polls.
-const state = { config: null, slots: [], slot: null, holdings: [], scheduler: null, holding: null, booted: false, loadingHoldings: false };
+const state = { config: null, slots: [], slot: null, holdings: [], scheduler: null, holding: null, booted: false, loadingHoldings: false, holdingsEverLoaded: false, holdingsFailed: false, reloadQueued: false, ui: { q: '', group: 'none' } };
 const $ = (s) => document.querySelector(s);
 const dateInput = $('#dateInput');
 const slotGrid = $('#slotGrid'), slotState = $('#slotState');
-const slotDialog = $('#slotDialog'), slotQty = $('#slotQty'), slotAuto = $('#slotAuto'), slotRepeat = $('#slotRepeat');
+const addDrawer = $('#addDrawer'), slotForm = $('#slotForm'), slotConfirmBlock = $('#slotConfirmBlock');
+const slotQty = $('#slotQty'), slotAuto = $('#slotAuto'), slotRepeat = $('#slotRepeat');
 const slotStopDate = $('#slotStopDate'), slotStopTime = $('#slotStopTime');
+const slotConfirmBtn = $('#slotConfirm');
 const holdingPage = $('#holdingPage'), listView = $('#listView');
 const confirmDialog = $('#confirmDialog');
+
+// ---- Drawer (ADD TO CART) open/close ----
+// The drawer is the whole add-to-cart flow, so it is only ever dismissed
+// through these helpers — that keeps the exit animation and the scrim/Esc
+// behaviour on one path instead of three.
+let drawerCloseTimer = null;
+function openAddDrawer() {
+  if (drawerCloseTimer) { clearTimeout(drawerCloseTimer); drawerCloseTimer = null; }
+  addDrawer.classList.remove('closing');
+  if (!addDrawer.open) addDrawer.showModal();
+}
+function closeAddDrawer() {
+  if (!addDrawer.open) return;
+  clearTimeout(drawerCloseTimer);
+  addDrawer.classList.add('closing');
+  drawerCloseTimer = setTimeout(() => {
+    drawerCloseTimer = null;
+    addDrawer.classList.remove('closing');
+    try { if (addDrawer.open) addDrawer.close(); } catch { /* ignore */ }
+  }, 180);
+}
+function resetSlotConfirm() {
+  state.slot = null;
+  slotConfirmBlock?.classList.add('hidden');
+  slotConfirmBtn.disabled = true;
+  $('#step3')?.classList.remove('active');
+  $('#slotError')?.classList.add('hidden');
+  if ($('#slotChunks')) $('#slotChunks').innerHTML = '';
+}
 
 function esc(v) { return String(v ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;'); }
 
@@ -29,6 +60,9 @@ const I = {
   info: _svg + '<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>',
   play: _svg + '<polygon points="5 3 19 12 5 21 5 3"/></svg>',
   pause: _svg + '<rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>',
+  grid: _svg + '<rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>',
+  search: _svg + '<circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>',
+  calendar: _svg + '<rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>',
 };
 
 const ICONS = { info: I.info, success: I.check, error: I.x };
@@ -285,13 +319,13 @@ function renderSlots(d) {
       <span class="slot-avail">${a} avail · cap ${s.capacity}</span>
       <span class="status-badge status-${st === 'Open' ? 'open' : st === 'Full' ? 'danger' : 'muted'}">${st}</span>
       <div class="slot-actions">
-        <button class="button button-primary button-small" data-slot="${s.id}" ${ok ? '' : 'disabled'}>${I.plus}Add to cart</button>
+        <button class="button button-primary button-small" type="button" data-slot="${s.id}" ${ok ? '' : 'disabled'}>${I.plus}Add to cart</button>
       </div>
     </div>`;
   }).join('');
 }
 
-// ---- Dialog 3: confirm (qty + auto option before Add to cart) ----
+// ---- Drawer step 3: confirm (qty + auto option before Add to cart) ----
 function openSlotDialog(slot) {
   state.slot = slot;
   $('#slotTitle').textContent = `${dateInput.value} ${slot.start}`;
@@ -309,8 +343,10 @@ function openSlotDialog(slot) {
   $('#slotError').classList.add('hidden');
   renderSlotChunks();
   $('#step3').classList.add('active');
-  if (!slotDialog.open) slotDialog.showModal();
-  setTimeout(() => slotQty.focus(), 50);
+  slotConfirmBlock.classList.remove('hidden');
+  slotConfirmBtn.disabled = false;
+  openAddDrawer();
+  setTimeout(() => slotQty.focus(), 60);
 }
 
 function defaultStopHour() {
@@ -343,17 +379,20 @@ function syncStopInputs() {
 
 function renderSlotChunks() {
   const err = $('#slotError');
+  if (!state.slot) return 0;
   try {
     const q = resolveQty(slotQty.value, Number(state.slot.availables));
     if (!q) throw new Error('Nothing to take.');
     const c = chunksFor(q);
     $('#slotChunks').innerHTML = `<div class="chunk-line">Taking <strong>${q}</strong> in ${c.length} request(s): <strong>[${c.join(' + ')}]</strong></div>`;
     err.classList.add('hidden');
+    slotConfirmBtn.disabled = false;
     return q;
   } catch (e) {
     $('#slotChunks').innerHTML = '';
     err.textContent = e.message;
     err.classList.remove('hidden');
+    slotConfirmBtn.disabled = true;
     return 0;
   }
 }
@@ -373,9 +412,8 @@ async function confirmSlot(e) {
     return;
   }
   const btn = $('#slotConfirm');
-  const card = $('#slotForm');
   setBtn(btn, true, 'Adding…');
-  card.dataset.busy = 'true';
+  slotForm.dataset.busy = 'true';
   try {
     const d = await api('/api/holdings', {
       method: 'POST',
@@ -387,7 +425,8 @@ async function confirmSlot(e) {
         autoStopTime: slotAuto.checked ? stopTime : null,
       }),
     });
-    slotDialog.close();
+    addDrawer.close();
+    resetSlotConfirm();
     const h = d.holding;
     const inCart = (h.cartItems || []).reduce((a, i) => a + Number(i.quantity || 0), 0);
     const stopTxt = slotAuto.checked ? ` Auto stops ${h.auto_stop_madrid}.` : '';
@@ -395,15 +434,20 @@ async function confirmSlot(e) {
     await loadHoldings({ silent: true });
   } catch (err) {
     const el = $('#slotError'); el.textContent = err.message; el.classList.remove('hidden');
+    slotConfirmBtn.disabled = false; // the form is still valid — let the user retry
     await loadHoldings({ silent: true });
-  } finally { setBtn(btn, false); card.dataset.busy = 'false'; }
+  } finally { setBtn(btn, false); slotForm.dataset.busy = 'false'; }
 }
 
 // ---- Holdings + detail dialog ----
 const TERMINAL = ['stopped', 'auto_stopped', 'removed'];
 const isTerminal = (h) => TERMINAL.includes(h.status);
 const activeItemsOf = (h) => (h.cartItems || []).filter((i) => i.status === 'active');
-const activeQtyOf = (h) => activeItemsOf(h).reduce((a, i) => a + Number(i.quantity || 0), 0);
+// The list endpoint sends pre-aggregated active totals (it omits cartItems to
+// keep the payload small); fall back to counting items for a full record.
+const activeQtyOf = (h) => (h.active_quantity != null
+  ? Number(h.active_quantity || 0)
+  : activeItemsOf(h).reduce((a, i) => a + Number(i.quantity || 0), 0));
 function badgeFor(status) {
   if (/manual_hold|running|scheduled/.test(status)) return 'open';
   if (/failed|partial|no_availability/.test(status)) return 'danger';
@@ -446,7 +490,9 @@ function renderHoldings() {
     .reduce((a, h) => a + activeQtyOf(h), 0);
   const due = state.scheduler?.dueCount ?? 0;
   $('#metricDue').textContent = due;
-  $('#tickInfo').textContent = `tick ${state.scheduler ? Math.round((state.scheduler.tickIntervalMs || 15000) / 1000) + 's' : '—'} · ${state.scheduler?.lastTickResult || ''}`.slice(0, 80);
+  const tickTxt = state.scheduler ? `every ${Math.round((state.scheduler.tickIntervalMs || 15000) / 1000)}s` : '—';
+  $('#tickInfo').textContent = tickTxt;
+  $('#tickInfo').title = state.scheduler?.lastTickResult || '';
   $('#autoPill').textContent = `Auto: ${state.scheduler?.enabled ? 'ON' : 'OFF'}`;
   const autoBtn = $('#autoToggle');
   if (autoBtn.dataset.loading !== 'true') autoBtn.innerHTML = state.scheduler?.enabled ? `${I.pause}Stop auto` : `${I.play}Start auto`;
@@ -461,18 +507,105 @@ function renderHoldings() {
     const live = h.auto_enabled && h.next_run_at && !isTerminal(h)
       ? `${I.clock}<span class="countdown" data-next="${esc(h.next_run_at)}" title="Next run ${esc(fmtDT(h.next_run_at))} ${TZ_SHORT}">${esc(countdownText(h.next_run_at))}</span>`
       : '';
-    return `<div class="next-row"><strong>${esc(h.local_date)} ${esc(h.local_time)}</strong><span>OccID ${h.timetable_id} · ${esc(statusLabel(h.status))} · ${esc(modeLabel(h))}</span><span class="mono">${when}${live ? ` · ${live}` : ''} · stop ${esc(h.auto_stop_madrid || '—')}</span></div>`;
-  }).join('') || `<div class="empty-preview">${state.holdings.length ? 'No active holdings.' : 'No holdings yet — pick a date above to start.'}</div>`;
+    return `<div class="next-row">
+      <div class="next-top"><strong>${esc(fmtD(h.local_date))} ${esc(h.local_time)}</strong><span class="status-badge status-${badgeFor(h.status)}">${esc(statusLabel(h.status))}</span></div>
+      <span class="next-sub">OccID ${h.timetable_id} · ${esc(modeLabel(h))}</span>
+      <span class="next-sub mono">${when}${live ? ` · ${live}` : ''} · stop ${esc(h.auto_stop_madrid || '—')}</span>
+    </div>`;
+  }).join('') || `<div class="empty-preview">${state.holdings.length ? 'No active holdings.' : 'No holdings yet — press + in the rail to start one.'}</div>`;
+  const qc = $('#queueCount');
+  if (qc) qc.textContent = `${liveCount} active`;
+  renderHoldingsTable();
+}
+
+// Searchable haystack for one holding — date, time, status, ids, cart.
+function holdingHay(h) {
+  return [
+    h.local_date, h.local_time, h.timetable_id, h.ticket_id, h.id,
+    h.status, statusLabel(h.status), modeLabel(h),
+    h.auto_stop_madrid, h.remote_cart_id, h.requested_quantity,
+  ].filter((v) => v != null && v !== '').join(' ').toLowerCase();
+}
+
+function renderHoldingsTable() {
   const body = $('#holdingsTable tbody');
-  body.innerHTML = state.holdings.length ? state.holdings.map((h) => {
+  if (!body) return;
+  const q = String(state.ui.q || '').trim().toLowerCase();
+  const all = state.holdings;
+  const list = q ? all.filter((h) => holdingHay(h).includes(q)) : all;
+
+  const clearBtn = $('#holdingsSearchClear');
+  if (clearBtn) clearBtn.hidden = !q;
+  const count = $('#holdingsCount');
+  if (count) {
+    count.innerHTML = `<span><strong>${list.length}</strong> of ${all.length} holding${all.length === 1 ? '' : 's'}</span>`
+      + (q ? `<span class="filter-chip">${esc(q)}<button type="button" data-clear-filter aria-label="Clear search">${I.x}</button></span>` : '');
+  }
+
+  const emptyRow = (msg) => `<tr><td colspan="3" class="empty-cell">${esc(msg)}</td></tr>`;
+  if (!list.length) {
+    body.innerHTML = emptyRow(q ? `No holdings match “${q}”.` : 'No holdings yet.');
+    return;
+  }
+
+  const rowFor = (h) => {
     const added = h.status === 'removed' ? 0 : activeQtyOf(h);
     const sub = isTerminal(h)
       ? `OccID ${h.timetable_id} · was ${h.requested_quantity} wanted · ${esc(statusLabel(h.status))}`
       : `OccID ${h.timetable_id} · want ${h.requested_quantity} · in cart ${added} · ${esc(modeLabel(h))}`;
     return `<tr><td><strong>${fmtD(h.local_date)} ${esc(h.local_time)}</strong><span class="sub-cell">${sub}</span><span class="sub-cell">Auto stop ${esc(h.auto_stop_madrid || '—')}</span></td>
       <td><span class="status-badge status-${badgeFor(h.status)}">${esc(statusLabel(h.status))}</span></td>
-      <td class="actions-cell"><button class="table-action" data-view="${h.id}">${I.eye}View</button>${h.status === 'removed' ? `<button class="table-action icon-only danger" data-purge="${h.id}" type="button" title="Delete permanently" aria-label="Delete holding #${h.id} permanently">${I.x}</button>` : ''}</td></tr>`;
-  }).join('') : '<tr><td colspan="3" class="empty-cell">No holdings yet.</td></tr>';
+      <td class="actions-cell"><button class="table-action" type="button" data-view="${h.id}">${I.eye}View</button>${h.status === 'removed' ? `<button class="table-action icon-only danger" data-purge="${h.id}" type="button" title="Delete permanently" aria-label="Delete holding #${h.id} permanently">${I.x}</button>` : ''}</td></tr>`;
+  };
+
+  if (state.ui.group !== 'date') { body.innerHTML = list.map(rowFor).join(''); return; }
+
+  // Group by date, newest first — sticky headers anchor each cluster.
+  const groups = new Map();
+  for (const h of list) {
+    const key = h.local_date || '—';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(h);
+  }
+  const keys = [...groups.keys()].sort((a, b) => String(b).localeCompare(String(a)));
+  body.innerHTML = keys.map((k) => {
+    const rows = groups.get(k);
+    const total = rows.reduce((a, h) => a + (h.status === 'removed' ? 0 : activeQtyOf(h)), 0);
+    return `<tr class="group-row"><th colspan="3">${esc(fmtD(k))}<span class="group-meta">${rows.length} holding${rows.length === 1 ? '' : 's'}${total ? ` · ${total} in cart` : ''}</span></th></tr>`
+      + rows.map(rowFor).join('');
+  }).join('');
+}
+
+// A failed load must never leave the skeleton on screen — say what broke and
+// give a one-click way back.
+function renderHoldingsError(msg, opts = {}) {
+  const body = $('#holdingsTable tbody');
+  const list = $('#nextUp');
+  const pill = $('#queueCount');
+  if (list) list.innerHTML = `<div class="empty-preview">Run queue unavailable — the controller did not answer.</div>`;
+  if (pill) pill.textContent = 'offline';
+  const count = $('#holdingsCount');
+  if (count) count.innerHTML = '';
+  const clearBtn = $('#holdingsSearchClear');
+  if (clearBtn) clearBtn.hidden = true;
+  const tick = $('#tickInfo');
+  if (tick) tick.textContent = '—';
+  if (!body) return;
+  body.innerHTML = `<tr><td colspan="3"><div class="inline-error"><span>${esc(msg)}</span>${opts.retry ? '<button class="button button-secondary button-small" data-retry type="button">Retry</button>' : ''}</div></td></tr>`;
+}
+
+function setHoldingsSearch(q) {
+  state.ui.q = String(q ?? '');
+  renderHoldingsTable();
+}
+function setHoldingsGroup(mode) {
+  state.ui.group = mode === 'date' ? 'date' : 'none';
+  document.querySelectorAll('#holdingsGroup button').forEach((b) => {
+    const on = b.dataset.group === state.ui.group;
+    b.classList.toggle('is-on', on);
+    b.setAttribute('aria-pressed', String(on));
+  });
+  renderHoldingsTable();
 }
 
 function holdingError(msg) {
@@ -504,6 +637,21 @@ function tokenShort(t) {
 }
 
 function isHoldingOpen() { return state.holding != null && !holdingPage.classList.contains('hidden'); }
+
+// The holdings list is a lean summary (no cart items, no run history), so the
+// detail page can only be rendered from GET /api/holdings/:id. Re-pull it
+// instead of reusing whatever the list happened to carry.
+async function syncOpenHolding(id) {
+  if (!isHoldingOpen() || !state.holding || state.holding.id !== id) return null;
+  try {
+    const d = await api(`/api/holdings/${id}`);
+    if (isHoldingOpen() && state.holding && state.holding.id === id) {
+      state.holding = d.holding;
+      renderHoldingInto(d.holding);
+    }
+    return d.holding;
+  } catch { return null; }
+}
 
 function openHolding(h, opts = {}) {
   state.holding = h;
@@ -547,7 +695,10 @@ async function handleRoute() {
       await loadHoldings({ silent: true });
       const h = holdingForOccId(m[1]);
       if (h) {
-        openHolding(h, { push: false });
+        // The list only told us which holding it is — pull the full record so
+        // the detail page has its cart and run history.
+        const d = await api(`/api/holdings/${h.id}`);
+        openHolding(d.holding, { push: false });
         const n = (state.holdings || []).filter((x) => Number(x.timetable_id) === Number(m[1]) && x.status !== 'removed').length;
         if (n > 1) showNotice(`${n} holdings share OccID ${m[1]} — opened latest (#${h.id}). Use /h/<id> for a specific one.`, 'info');
         return;
@@ -628,7 +779,7 @@ function renderHoldingInto(h) {
         ${row('Auth', authOk ? `<span class="status-badge status-open">Authenticated</span> <span class="sub-cell">obtained ${h.auth_obtained_at ? fmtDT(h.auth_obtained_at) : '—'}</span>` : '<span class="status-badge status-muted">No token yet</span>')}
       </dl>
       <div class="copy-row">
-        <code class="token-box mono" id="tokenBox" data-full="${esc(h.auth_token || '')}">${esc(authOk ? tokenShort(h.auth_token) : '—')}</code>
+        <code class="token-box mono" id="tokenBox" tabindex="0" role="region" aria-label="Authentication token — scroll sideways to see the full value" data-full="${esc(h.auth_token || '')}">${esc(authOk ? tokenShort(h.auth_token) : '—')}</code>
         <button class="table-action icon-only" data-copy-token type="button" title="Copy token" aria-label="Copy token" ${authOk ? '' : 'disabled'}>${I.copy}</button>
         <button class="table-action" data-toggle-token type="button" ${authOk ? '' : 'disabled'}>${I.eye}Show</button>
       </div>
@@ -651,7 +802,7 @@ function renderHoldingInto(h) {
 
     <div class="detail-section span-2">
       <h3 class="section-title">${I.layers}Items · ${h.status === 'removed' ? 0 : activeItems.length} active${historyItems.length ? ` (+${historyItems.length} history)` : ''}</h3>
-      ${activeItems.length && h.status !== 'removed' ? `<div class="table-wrap"><table class="items-table"><thead><tr><th>Chunk</th><th>ITEM_ID</th><th>Qty</th><th>Cart</th><th>Status</th></tr></thead><tbody>${activeItems.map((i) => `
+      ${activeItems.length && h.status !== 'removed' ? `<div class="table-wrap" tabindex="0" role="region" aria-label="Cart items — scroll for all"><table class="items-table"><thead><tr><th>Chunk</th><th>ITEM_ID</th><th>Qty</th><th>Cart</th><th>Status</th></tr></thead><tbody>${activeItems.map((i) => `
         <tr><td>#${i.chunk_number} ×${i.quantity}</td>
         <td class="mono">${i.remote_item_id ?? '?'} <button class="table-action icon-only" data-copy="${i.remote_item_id ?? ''}" type="button" title="Copy ITEM_ID" aria-label="Copy ITEM_ID">${I.copy}</button></td>
         <td>${i.quantity}</td>
@@ -663,7 +814,7 @@ function renderHoldingInto(h) {
 
     <div class="detail-section span-2">
       <h3 class="section-title">${I.clock}Run history · ${(h.runs || []).length} run(s)</h3>
-      ${(h.runs || []).length ? `<div class="table-wrap"><table class="runs-table"><thead><tr><th>#</th><th>Started</th><th>Via</th><th>Result</th><th>Avail</th><th>Added</th><th>Cart ID</th><th>Item IDs</th><th>Total</th><th>Note</th></tr></thead><tbody>${h.runs.map((r) => `
+      ${(h.runs || []).length ? `<div class="table-wrap" tabindex="0" role="region" aria-label="Run history — scroll for all"><table class="runs-table"><thead><tr><th>#</th><th>Started</th><th>Via</th><th>Result</th><th>Avail</th><th>Added</th><th>Cart ID</th><th>Item IDs</th><th>Total</th><th>Note</th></tr></thead><tbody>${h.runs.map((r) => `
         <tr><td>#${r.run_number}</td>
         <td class="mono">${fmtDT(r.started_at)}</td>
         <td>${esc(r.trigger)}</td>
@@ -778,10 +929,7 @@ async function holdingAction(a) {
       try { await api(`/api/holdings/${h.id}/${h.auto_enabled ? 'disable-auto' : 'enable-auto'}`, { method: 'POST', body: '{}' }); }
       finally { setBtn(btn, false); }
       await loadHoldings({ silent: true });
-      if (isHoldingOpen() && state.holding) {
-        const fresh = state.holdings.find((x) => x.id === state.holding.id);
-        if (fresh) { state.holding = fresh; renderHoldingInto(fresh); }
-      }
+      if (isHoldingOpen() && state.holding) await syncOpenHolding(state.holding.id);
       showNotice(h.auto_enabled ? 'Auto re-add OFF.' : 'Auto re-add ON.', 'success');
     } else if (a === 'stop') {
       const ok = await askConfirm({ title: 'Stop holding?', text: 'Auto re-add turns off. Cart stays held upstream until expiry.', confirmLabel: 'Stop', danger: false });
@@ -792,10 +940,7 @@ async function holdingAction(a) {
       finally { setBtn(yes, false); }
       closeConfirm();
       await loadHoldings({ silent: true });
-      if (isHoldingOpen() && state.holding) {
-        const fresh = state.holdings.find((x) => x.id === state.holding.id);
-        if (fresh) { state.holding = fresh; renderHoldingInto(fresh); }
-      }
+      if (isHoldingOpen() && state.holding) await syncOpenHolding(state.holding.id);
       showNotice('Holding stopped.', 'success');
     } else if (a === 'remove') {
       const ok = await askConfirm({ title: 'Remove tickets?', text: `Removes all cart items from cart ${h.remote_cart_id ? h.remote_cart_id.slice(0, 8) + '…' : '—'}. This cannot be undone.`, confirmLabel: 'Remove', danger: true });
@@ -821,28 +966,42 @@ async function loadHoldings(opts = {}) {
   const silent = Boolean(opts.silent) || (state.booted && !opts.force);
   const refreshBtn = $('#refreshHoldings');
   if (!silent) {
-    if (!state.booted) skeletonHoldings();
+    if (!state.booted && !state.holdingsEverLoaded) skeletonHoldings();
     else setBtn(refreshBtn, true, 'Refreshing…');
   }
-  if (state.loadingHoldings) return;
+  // A poll can land while a slow load is still in flight. Dropping it loses
+  // that update entirely, so remember it and re-fetch once the current one ends.
+  if (state.loadingHoldings) { state.reloadQueued = true; return; }
   state.loadingHoldings = true;
   try {
     const d = await api('/api/holdings');
     state.holdings = d.holdings || [];
     state.scheduler = d.scheduler;
+    state.holdingsEverLoaded = true;
+    state.holdingsFailed = false;
     renderHoldings();
-    // Keep the open detail page in sync with polls + auto re-adds.
-    if (isHoldingOpen() && state.holding) {
-      const fresh = state.holdings.find((x) => x.id === state.holding.id);
-      if (fresh && refreshBtn.dataset.loading !== 'true') { state.holding = fresh; renderHoldingInto(fresh); }
+    // Keep the open detail page in sync with polls + auto re-adds. It needs the
+    // full record, which the lean list no longer carries.
+    if (isHoldingOpen() && state.holding && refreshBtn.dataset.loading !== 'true') {
+      syncOpenHolding(state.holding.id);
     }
   } catch (e) {
-    if (!state.booted) $('#nextUp').innerHTML = `<div class="inline-error"><span>${esc(e.message)}</span></div>`;
+    // Never leave the skeleton up: say what went wrong and offer a retry.
+    renderHoldingsError(e.message, { retry: true });
+    state.holdingsFailed = true;
     showNotice(e.message, 'error');
+    // A slow/cold server (VPS right after a restart) often fails the very first
+    // request only. Retry once on its own before making the user ask for it.
+    if (!state.holdingsEverLoaded && (opts.attempts || 0) < 1) {
+      const again = (opts.attempts || 0) + 1;
+      setTimeout(() => loadHoldings({ ...opts, attempts: again }), 1200);
+    }
   } finally {
     state.loadingHoldings = false;
     if (!silent) setBtn(refreshBtn, false);
     if (refreshBtn.dataset.loading === 'false') refreshBtn.innerHTML = `${I.refresh}Refresh`;
+    // Run the update we swallowed earlier, now that nothing is in flight.
+    if (state.reloadQueued) { state.reloadQueued = false; loadHoldings({ silent: true }); }
   }
 }
 async function loadActivity() {
@@ -906,6 +1065,7 @@ $('#clearSlots').addEventListener('click', () => {
   slotState.textContent = 'Pick a date, then check availability.';
   $('#step2').classList.remove('active');
   $('#step3').classList.remove('active');
+  resetSlotConfirm();
 });
 dateInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); loadAvail(); } });
 slotGrid.addEventListener('click', (e) => {
@@ -918,8 +1078,50 @@ slotStopDate.addEventListener('change', updateStopHint);
 slotStopTime.addEventListener('change', updateStopHint);
 $('#slotStopDefault').addEventListener('click', setDefaultStopInputs);
 $('#slotForm').addEventListener('submit', confirmSlot);
-slotDialog.addEventListener('close', () => { $('#slotForm').dataset.busy = 'false'; const b = $('#slotConfirm'); if (b.dataset.loading === 'true') setBtn(b, false); b.innerHTML = `${I.ticket}Add to cart`; });
+
+// ---- Drawer wiring (rail +, close button, Cancel, Esc, scrim) ----
+$('#openAddDrawer').addEventListener('click', openAddDrawer);
+$('#addDrawerClose').addEventListener('click', closeAddDrawer);
+$('#drawerCancel').addEventListener('click', (e) => { e.preventDefault(); closeAddDrawer(); });
+// Esc: cancel the native close so the exit animation can play.
+addDrawer.addEventListener('cancel', (e) => { e.preventDefault(); closeAddDrawer(); });
+// Scrim click (the dialog element itself is the backdrop target).
+addDrawer.addEventListener('click', (e) => { if (e.target === addDrawer) closeAddDrawer(); });
+addDrawer.addEventListener('close', () => {
+  slotForm.dataset.busy = 'false';
+  const b = slotConfirmBtn;
+  if (b.dataset.loading === 'true') setBtn(b, false);
+  b.innerHTML = `${I.ticket}Add to cart`;
+  b.disabled = true;
+  resetSlotConfirm();
+});
+$('#railDashboard').addEventListener('click', () => {
+  if (!listView.classList.contains('hidden')) { window.scrollTo({ top: 0, behavior: 'smooth' }); return; }
+  closeHolding();
+});
+
+// ---- Holdings search + group by date ----
+$('#holdingsSearch').addEventListener('input', (e) => setHoldingsSearch(e.target.value));
+$('#holdingsSearchClear').addEventListener('click', () => {
+  const inp = $('#holdingsSearch');
+  inp.value = '';
+  setHoldingsSearch('');
+  inp.focus();
+});
+$('#holdingsGroup').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-group]');
+  if (b) setHoldingsGroup(b.dataset.group);
+});
+$('#holdingsCount').addEventListener('click', (e) => {
+  if (!e.target.closest('[data-clear-filter]')) return;
+  const inp = $('#holdingsSearch');
+  inp.value = '';
+  setHoldingsSearch('');
+  inp.focus();
+});
+
 $('#holdingsTable tbody').addEventListener('click', async (e) => {
+  if (e.target.closest('[data-retry]')) { loadHoldings({ force: true }); return; }
   const p = e.target.closest('[data-purge]');
   if (p) { purgeHolding(Number(p.dataset.purge)); return; }
   const v = e.target.closest('[data-view]');
@@ -996,8 +1198,19 @@ $('#logoutBtn').addEventListener('click', async () => {
   try { await api('/api/logout', { method: 'POST', body: '{}' }); } catch { /* ignore */ }
   location.href = '/login.html';
 });
-// Silent background refresh; skip when tab hidden to avoid pile-ups
-setInterval(() => { if (!document.hidden) loadHoldings({ silent: true }); }, 15000);
+// Silent background refresh; skipped while the tab is hidden to avoid pile-ups.
+// Self-rescheduling so the cadence can tighten while the console is showing an
+// error — a transient VPS hiccup then clears itself, no manual reload needed.
+let pollTimer = null;
+function schedulePoll() {
+  clearTimeout(pollTimer);
+  const delay = state.holdingsFailed ? 4000 : 15000;
+  pollTimer = setTimeout(async () => {
+    await loadHoldings({ silent: true });
+    schedulePoll();
+  }, delay);
+}
+schedulePoll();
 // Live next-run countdowns, every second
 setInterval(tickCountdowns, 1000);
 boot();

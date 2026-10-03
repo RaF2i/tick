@@ -14,7 +14,25 @@
 </head>
 <body>
 <div id="pageLoader" class="page-loader"><span class="spinner"></span><span>Connecting to controller…</span></div>
+
 <div class="app-shell">
+
+  <!-- Collapsed navigation rail (always narrow) -->
+  <nav class="rail" aria-label="Primary">
+    <button id="openAddDrawer" class="rail-btn rail-btn-add" type="button"
+            title="New hold — add to cart" aria-label="New hold, add to cart"
+            aria-haspopup="dialog" aria-controls="addDrawer">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      <span class="rail-tip" aria-hidden="true">New hold</span>
+    </button>
+    <span class="rail-divider" aria-hidden="true"></span>
+    <button id="railDashboard" class="rail-btn is-active" type="button"
+            title="Dashboard" aria-label="Dashboard" aria-current="page">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>
+      <span class="rail-tip" aria-hidden="true">Dashboard</span>
+    </button>
+  </nav>
+
   <main class="main-content">
     <div id="toasts" class="toasts" aria-live="polite"></div>
 
@@ -24,38 +42,67 @@
     </header>
 
     <div id="listView">
-    <div class="metric-grid">
-      <article class="metric-card"><span class="metric-label"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>Active holdings</span><strong id="metricActive">0</strong></article>
-      <article class="metric-card"><span class="metric-label"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 9a3 3 0 0 1 0 6v2a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-2a3 3 0 0 1 0-6V7a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2Z"/><path d="M13 5v2"/><path d="M13 11v2"/><path d="M13 17v2"/></svg>Tickets in carts</span><strong id="metricAdded">0</strong></article>
-      <article class="metric-card"><span class="metric-label"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>Due now</span><strong id="metricDue">0</strong><span class="metric-foot" id="tickInfo">tick —</span></article>
-    </div>
+      <div class="dash-grid">
 
-    <section class="panel">
-      <div class="panel-heading"><div><p class="eyebrow">ADD TO CART</p><h2>New hold</h2></div></div>
-      <div class="stepper"><span class="step active" id="step1">1 Date</span><span class="step" id="step2">2 Slot</span><span class="step" id="step3">3 Confirm</span></div>
-      <div class="date-row">
-        <label><span>Date</span><input id="dateInput" type="date"></label>
-        <button id="loadAvailability" class="button button-secondary" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>Check availability</button>
-        <button id="clearSlots" class="button button-ghost" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>Clear</button>
+        <!-- LEFT COLUMN: stats + persisted run queue -->
+        <div class="dash-col">
+          <div class="metric-grid">
+            <article class="metric-card"><span class="metric-label"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>Active</span><strong id="metricActive">0</strong><span class="metric-foot">holdings</span></article>
+            <article class="metric-card"><span class="metric-label"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 9a3 3 0 0 1 0 6v2a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-2a3 3 0 0 1 0-6V7a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2Z"/><path d="M13 5v2"/><path d="M13 11v2"/><path d="M13 17v2"/></svg>In carts</span><strong id="metricAdded">0</strong><span class="metric-foot">tickets held</span></article>
+            <article class="metric-card"><span class="metric-label"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>Due now</span><strong id="metricDue">0</strong><span class="metric-foot" id="tickInfo">tick —</span></article>
+          </div>
+
+          <section class="panel panel-fill">
+            <div class="panel-heading">
+              <div><p class="eyebrow">PERSISTED STATE</p><h2>Run queue</h2></div>
+              <span class="pill pill-quiet" id="queueCount">0 active</span>
+            </div>
+            <div id="nextUp" class="next-list" tabindex="0" role="region" aria-label="Run queue — active holdings and next auto run"></div>
+          </section>
+        </div>
+
+        <!-- RIGHT COLUMN: holdings, full height -->
+        <section class="panel panel-fill">
+          <div class="panel-heading">
+            <div><p class="eyebrow">PERSISTED STATE</p><h2>Holdings</h2></div>
+            <button id="refreshHoldings" class="button button-ghost" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>Refresh</button>
+          </div>
+
+          <div class="holdings-tools">
+            <label class="search-box">
+              <svg class="ic search-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+              <input id="holdingsSearch" type="search" autocomplete="off" spellcheck="false"
+                     placeholder="Search date, time, status, OccID…" aria-label="Search holdings">
+              <button id="holdingsSearchClear" class="search-clear" type="button" aria-label="Clear search" hidden>
+                <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              </button>
+            </label>
+            <div class="segmented" id="holdingsGroup" role="group" aria-label="Group holdings by date">
+              <button type="button" data-group="none" class="is-on" aria-pressed="true">Flat</button>
+              <button type="button" data-group="date" aria-pressed="false">By date</button>
+            </div>
+          </div>
+
+          <div id="holdingsCount" class="holdings-count" role="status"></div>
+
+          <div class="table-wrap table-wrap-tall" tabindex="0" role="region" aria-label="Holdings table — scroll to see all rows">
+            <table id="holdingsTable">
+              <thead><tr><th>Date / time</th><th>Status</th><th></th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
       </div>
-      <div id="slotState" class="empty-preview">Pick a date, then check availability.</div>
-      <div id="slotGrid" class="slot-grid"></div>
-    </section>
 
-    <section class="panel">
-      <div class="panel-heading"><div><p class="eyebrow">PERSISTED STATE</p><h2>Holdings</h2></div><button id="refreshHoldings" class="button button-ghost" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>Refresh</button></div>
-      <div id="nextUp" class="next-list"></div>
-      <div class="table-wrap"><table id="holdingsTable"><thead><tr><th>Date / time</th><th>Status</th><th></th></tr></thead><tbody></tbody></table></div>
-    </section>
+      <details class="panel details">
+        <summary><span class="eyebrow">AUDIT TRAIL</span><strong>Activity &amp; server log</strong>
+          <span class="summary-actions"><button id="refreshActivity" class="button button-ghost button-small" type="button">Refresh</button> <button id="refreshLogs" class="button button-secondary button-small" type="button">Refresh logs</button></span></summary>
+        <div class="panel-heading"><h2>Server log</h2><span class="mono muted-text">logs/dashboard-&lt;date&gt;.log</span></div>
+        <pre id="logsPre" class="config-pre" tabindex="0" role="region" aria-label="Server log — scroll to see the full log">Loading…</pre>
+        <div class="table-wrap" tabindex="0" role="region" aria-label="API activity events"><table id="eventsTable"><thead><tr><th>Time</th><th>Endpoint</th><th>Code</th><th>Holding</th></tr></thead><tbody></tbody></table></div>
+      </details>
 
-    <details class="panel details">
-      <summary><span class="eyebrow">AUDIT TRAIL</span><strong>Activity &amp; server log</strong><span class="summary-actions"><button id="refreshActivity" class="button button-ghost button-small" type="button">Refresh</button> <button id="refreshLogs" class="button button-secondary button-small" type="button">Refresh logs</button></span></summary>
-      <div class="panel-heading"><h2>Server log</h2><span class="mono muted-text">logs/dashboard-&lt;date&gt;.log</span></div>
-      <pre id="logsPre" class="config-pre">Loading…</pre>
-      <div class="table-wrap"><table id="eventsTable"><thead><tr><th>Time</th><th>Endpoint</th><th>Code</th><th>Holding</th></tr></thead><tbody></tbody></table></div>
-    </details>
-
-    <details class="panel details"><summary>Controller settings</summary><pre id="configPre" class="config-pre">Loading…</pre></details>
+      <details class="panel details"><summary>Controller settings</summary><pre id="configPre" class="config-pre" tabindex="0" role="region" aria-label="Controller configuration JSON — scroll to see all settings">Loading…</pre></details>
     </div>
 
     <section id="holdingPage" class="holding-page hidden" aria-live="polite">
@@ -72,33 +119,62 @@
       <div id="holdingBody" class="holding-grid"></div>
     </section>
 
-    <footer class="page-footer"><span>Manual + auto controller · dark console</span><span class="mono">v0.5 · dark only</span></footer>
+    <footer class="page-footer"><span>Manual + auto controller · dark console</span><span class="mono">v0.6 · dark only</span></footer>
   </main>
 </div>
 
-<dialog id="slotDialog" class="dialog">
-  <form method="dialog" class="dialog-card" id="slotForm">
-    <p class="eyebrow">3 · CONFIRM ADD TO CART</p>
-    <h2 id="slotTitle">Slot</h2>
-    <p class="mono muted-text" id="slotMeta">—</p>
-    <label><span>Tickets (empty = take all <strong id="slotAvailHint">0</strong> available)</span><input id="slotQty" type="number" min="1" placeholder="empty = take all"></label>
-    <div id="slotChunks" class="chunk-list"></div>
-    <p class="dialog-error hidden" id="slotError"></p>
-    <label class="check"><input id="slotAuto" type="checkbox" checked><span>Auto re-add after</span></label>
-    <div class="auto-row"><input id="slotRepeat" type="number" min="1" max="1440" value="30"><span>minutes</span><span class="field-hint">Re-runs automatically until stopped.</span></div>
-    <div class="stop-block">
-      <span class="stop-label">Auto stop at — Spain time (Europe/Madrid)</span>
-      <div class="stop-row">
-        <input id="slotStopDate" type="date" aria-label="Auto stop date (Spain)">
-        <input id="slotStopTime" type="time" value="21:00" aria-label="Auto stop time (Spain)">
-        <button id="slotStopDefault" class="table-action" type="button" title="Reset to the default rule">Default</button>
+<!-- Right drawer: the entire ADD TO CART flow -->
+<dialog id="addDrawer" class="dialog drawer" aria-labelledby="addDrawerTitle">
+  <form method="dialog" class="drawer-card" id="slotForm" data-busy="false">
+    <header class="drawer-head">
+      <div class="drawer-head-text">
+        <p class="eyebrow">ADD TO CART</p>
+        <h2 id="addDrawerTitle">New hold</h2>
       </div>
-      <span class="field-hint" id="slotStopHint">Auto re-add stops at this moment and the holding is tagged <strong>Auto-stopped</strong>. Editable later from the holding page.</span>
+      <button id="addDrawerClose" class="drawer-close" type="button" title="Close" aria-label="Close add to cart">
+        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </header>
+
+    <div class="drawer-scroll" tabindex="0" role="group" aria-label="Add to cart steps — scroll for slots and confirmation">
+      <div class="stepper"><span class="step active" id="step1">1 Date</span><span class="step" id="step2">2 Slot</span><span class="step" id="step3">3 Confirm</span></div>
+
+      <div class="date-row">
+        <label><span>Date</span><input id="dateInput" type="date"></label>
+        <button id="loadAvailability" class="button button-secondary" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>Check availability</button>
+        <button id="clearSlots" class="button button-ghost" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>Clear</button>
+      </div>
+
+      <div id="slotState" class="empty-preview">Pick a date, then check availability.</div>
+      <div id="slotGrid" class="slot-grid"></div>
+
+      <section class="confirm-block hidden" id="slotConfirmBlock">
+        <div class="confirm-head">
+          <p class="eyebrow">3 · CONFIRM</p>
+          <h3 id="slotTitle">Slot</h3>
+          <p class="mono muted-text" id="slotMeta">—</p>
+        </div>
+        <label><span>Tickets (empty = take all <strong id="slotAvailHint">0</strong> available)</span><input id="slotQty" type="number" min="1" placeholder="empty = take all"></label>
+        <div id="slotChunks" class="chunk-list"></div>
+        <label class="check"><input id="slotAuto" type="checkbox" checked><span>Auto re-add after</span></label>
+        <div class="auto-row"><input id="slotRepeat" type="number" min="1" max="1440" value="30"><span>minutes</span><span class="field-hint">Re-runs automatically until stopped.</span></div>
+        <div class="stop-block">
+          <span class="stop-label">Auto stop at — Spain time (Europe/Madrid)</span>
+          <div class="stop-row">
+            <input id="slotStopDate" type="date" aria-label="Auto stop date (Spain)">
+            <input id="slotStopTime" type="time" value="21:00" aria-label="Auto stop time (Spain)">
+            <button id="slotStopDefault" class="table-action" type="button" title="Reset to the default rule">Default</button>
+          </div>
+          <span class="field-hint" id="slotStopHint">Auto re-add stops at this moment and the holding is tagged <strong>Auto-stopped</strong>. Editable later from the holding page.</span>
+        </div>
+        <p class="dialog-error hidden" id="slotError"></p>
+      </section>
     </div>
-    <div class="dialog-actions">
-      <button value="cancel" class="button button-ghost" type="submit">Cancel</button>
-      <button id="slotConfirm" value="default" class="button button-primary" type="submit"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 9a3 3 0 0 1 0 6v2a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-2a3 3 0 0 1 0-6V7a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2Z"/><path d="M13 5v2"/><path d="M13 11v2"/><path d="M13 17v2"/></svg>Add to cart</button>
-    </div>
+
+    <footer class="drawer-foot">
+      <button id="drawerCancel" value="cancel" class="button button-ghost" type="submit">Cancel</button>
+      <button id="slotConfirm" value="default" class="button button-primary" type="submit" disabled><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 9a3 3 0 0 1 0 6v2a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-2a3 3 0 0 1 0-6V7a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2Z"/><path d="M13 5v2"/><path d="M13 11v2"/><path d="M13 17v2"/></svg>Add to cart</button>
+    </footer>
   </form>
 </dialog>
 
