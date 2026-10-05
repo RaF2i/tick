@@ -1171,13 +1171,35 @@ async function handleApi(req, res, url) {
       return sendJson(res, 200, { holding: out });
     }
     if (req.method === 'POST' && segments[3] === 'purge') {
-      // Permanent delete for housekeeping — removed holdings only, so a live
-      // cart can never be orphaned. cart_items + runs CASCADE, audit keeps NULLs.
+      // Permanent delete for housekeeping. Removed holdings only by default, so a
+// live cart can never be orphaned.
+//
+// `force` is the UI's escape hatch for clearing stale clutter rows
+// (remove_failed / failed / no_availability / stopped leftovers). It is
+// deliberately an ALLOW-list: anything still holding or being topped up
+// (manual_hold, running, scheduled, partial, ...) stays protected, because
+// dropping that row also drops the reference needed to release real tickets.
+// Those must go through "Remove tickets" first.
+const STALE_PURGEABLE = ['removed', 'failed', 'remove_failed', 'no_availability', 'stopped', 'auto_stopped'];
+
+const body = await readJsonBody(req);
       const target = getHolding(id);
-      if (target.status !== 'removed') throw errorWithStatus('Only removed holdings can be deleted permanently.', 409);
+      const force = body?.force === true;
+      if (target.status !== 'removed') {
+        if (!force) throw errorWithStatus('Only removed holdings can be deleted permanently.', 409);
+        if (!STALE_PURGEABLE.includes(target.status)) {
+          throw errorWithStatus(
+            `Holding #${id} is still live (${target.status}) and may hold tickets — use Remove tickets first, then delete.`,
+            409,
+          );
+        }
+      }
+      const orphaned = (target.cartItems || [])
+        .filter((i) => i.status === 'active')
+        .reduce((a, i) => a + Number(i.quantity || 0), 0);
       db.prepare('DELETE FROM holdings WHERE id = ?').run(id);
-      logLine(`HOLDING #${id}: purged from database`);
-      return sendJson(res, 200, { ok: true });
+      logLine(`HOLDING #${id}: purged from database${force ? ` (forced, status=${target.status}${orphaned ? `, ${orphaned} tickets may still be held upstream` : ''})` : ''}`);
+      return sendJson(res, 200, { ok: true, orphaned_quantity: orphaned });
     }
   }
   return sendJson(res, 404, { error: 'Route not found.' });

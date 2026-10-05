@@ -508,7 +508,7 @@ function renderHoldings() {
       ? `${I.clock}<span class="countdown" data-next="${esc(h.next_run_at)}" title="Next run ${esc(fmtDT(h.next_run_at))} ${TZ_SHORT}">${esc(countdownText(h.next_run_at))}</span>`
       : '';
     return `<div class="next-row">
-      <div class="next-top"><strong>${esc(fmtD(h.local_date))} ${esc(h.local_time)}</strong><span class="status-badge status-${badgeFor(h.status)}">${esc(statusLabel(h.status))}</span></div>
+      <div class="next-top"><strong>${esc(fmtD(h.local_date))} ${esc(h.local_time)}</strong><span class="next-actions"><span class="status-badge status-${badgeFor(h.status)}">${esc(statusLabel(h.status))}</span><button class="row-x" type="button" data-purge="${h.id}" title="Delete holding #${h.id}" aria-label="Delete holding #${h.id}, ${esc(fmtD(h.local_date))} ${esc(h.local_time)}">${I.x}</button></span></div>
       <span class="next-sub">OccID ${h.timetable_id} · ${esc(modeLabel(h))}</span>
       <span class="next-sub mono">${when}${live ? ` · ${live}` : ''} · stop ${esc(h.auto_stop_madrid || '—')}</span>
     </div>`;
@@ -553,9 +553,12 @@ function renderHoldingsTable() {
     const sub = isTerminal(h)
       ? `OccID ${h.timetable_id} · was ${h.requested_quantity} wanted · ${esc(statusLabel(h.status))}`
       : `OccID ${h.timetable_id} · want ${h.requested_quantity} · in cart ${added} · ${esc(modeLabel(h))}`;
+    const xTitle = h.status === 'removed'
+      ? 'Delete permanently'
+      : `Delete this stale holding (#${h.id})`;
     return `<tr><td><strong>${fmtD(h.local_date)} ${esc(h.local_time)}</strong><span class="sub-cell">${sub}</span><span class="sub-cell">Auto stop ${esc(h.auto_stop_madrid || '—')}</span></td>
       <td><span class="status-badge status-${badgeFor(h.status)}">${esc(statusLabel(h.status))}</span></td>
-      <td class="actions-cell"><button class="table-action" type="button" data-view="${h.id}">${I.eye}View</button>${h.status === 'removed' ? `<button class="table-action icon-only danger" data-purge="${h.id}" type="button" title="Delete permanently" aria-label="Delete holding #${h.id} permanently">${I.x}</button>` : ''}</td></tr>`;
+      <td class="actions-cell"><button class="table-action" type="button" data-view="${h.id}">${I.eye}View</button><button class="table-action icon-only danger" data-purge="${h.id}" type="button" title="${esc(xTitle)}" aria-label="${esc(xTitle)}">${I.x}</button></td></tr>`;
   };
 
   if (state.ui.group !== 'date') { body.innerHTML = list.map(rowFor).join(''); return; }
@@ -898,10 +901,22 @@ function askConfirm({ title, text, confirmLabel = 'Confirm', danger = true }) {
 }
 function closeConfirm() { try { if (confirmDialog.open) confirmDialog.close(); } catch { /* ignore */ } }
 
-async function purgeHolding(id) {
+// Shared by the holdings table and the run queue. Non-`removed` rows are
+// stale clutter (failed / remove_failed / old manual holds) and need `force`;
+// the dialog says plainly when tickets may still be held upstream so the
+// consequence is never a surprise.
+async function purgeHolding(id, opts = {}) {
+  const h = state.holdings.find((x) => x.id === id);
+  const removed = h?.status === 'removed';
+  const held = h ? activeQtyOf(h) : 0;
   const ok = await askConfirm({
-    title: 'Delete holding?',
-    text: `Permanently deletes holding #${id} and its history from the database. Its cart is already gone — this cannot be undone.`,
+    title: removed ? 'Delete holding?' : 'Delete stale holding?',
+    text: removed
+      ? `Permanently deletes holding #${id} and its history. Its cart is already gone — this cannot be undone.`
+      : `Holding #${id} · ${fmtD(h?.local_date)} ${h?.local_time || ''} · ${statusLabel(h?.status)} — is deleted from this console along with its history.`
+        + (held > 0
+          ? ` ${held} ticket${held === 1 ? '' : 's'} may still be held upstream; deleting the row loses the reference used to release them.`
+          : ' It holds no tickets.'),
     confirmLabel: 'Delete',
     danger: true,
   });
@@ -909,10 +924,16 @@ async function purgeHolding(id) {
   const yes = $('#confirmYes');
   setBtn(yes, true, 'Deleting…');
   try {
-    await api(`/api/holdings/${id}/purge`, { method: 'POST', body: '{}' });
+    const d = await api(`/api/holdings/${id}/purge`, {
+      method: 'POST',
+      body: JSON.stringify(removed ? {} : { force: true }),
+    });
     if (state.holding && state.holding.id === id) closeHolding();
     await loadHoldings({ silent: true });
-    showNotice(`Holding #${id} deleted.`, 'success');
+    const orphan = Number(d?.orphaned_quantity || 0);
+    showNotice(orphan > 0
+      ? `Holding #${id} deleted — ${orphan} ticket${orphan === 1 ? '' : 's'} may still be held upstream.`
+      : `Holding #${id} deleted.`, 'success');
   } catch (e) { showNotice(e.message, 'error'); await loadHoldings({ silent: true }); }
   finally { setBtn(yes, false); }
   closeConfirm();
@@ -1120,6 +1141,10 @@ $('#holdingsCount').addEventListener('click', (e) => {
   inp.focus();
 });
 
+$('#nextUp').addEventListener('click', (e) => {
+  const x = e.target.closest('[data-purge]');
+  if (x) { purgeHolding(Number(x.dataset.purge)); }
+});
 $('#holdingsTable tbody').addEventListener('click', async (e) => {
   if (e.target.closest('[data-retry]')) { loadHoldings({ force: true }); return; }
   const p = e.target.closest('[data-purge]');
