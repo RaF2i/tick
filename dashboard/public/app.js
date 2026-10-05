@@ -508,7 +508,7 @@ function renderHoldings() {
       ? `${I.clock}<span class="countdown" data-next="${esc(h.next_run_at)}" title="Next run ${esc(fmtDT(h.next_run_at))} ${TZ_SHORT}">${esc(countdownText(h.next_run_at))}</span>`
       : '';
     return `<div class="next-row">
-      <div class="next-top"><strong>${esc(fmtD(h.local_date))} ${esc(h.local_time)}</strong><span class="next-actions"><span class="status-badge status-${badgeFor(h.status)}">${esc(statusLabel(h.status))}</span><button class="row-x" type="button" data-purge="${h.id}" title="Delete holding #${h.id}" aria-label="Delete holding #${h.id}, ${esc(fmtD(h.local_date))} ${esc(h.local_time)}">${I.x}</button></span></div>
+      <div class="next-top"><strong>${esc(fmtD(h.local_date))} ${esc(h.local_time)}</strong><span class="next-actions"><span class="status-badge status-${badgeFor(h.status)}">${esc(statusLabel(h.status))}</span>${canDelete(h) ? `<button class="row-x" type="button" data-purge="${h.id}" title="Delete holding #${h.id}" aria-label="Delete holding #${h.id}, ${esc(fmtD(h.local_date))} ${esc(h.local_time)}, ${esc(statusLabel(h.status))}">${I.x}</button>` : ''}</span></div>
       <span class="next-sub">OccID ${h.timetable_id} · ${esc(modeLabel(h))}</span>
       <span class="next-sub mono">${when}${live ? ` · ${live}` : ''} · stop ${esc(h.auto_stop_madrid || '—')}</span>
     </div>`;
@@ -526,6 +526,17 @@ function holdingHay(h) {
     h.auto_stop_madrid, h.remote_cart_id, h.requested_quantity,
   ].filter((v) => v != null && v !== '').join(' ').toLowerCase();
 }
+
+// Mirror of the server's STALE_PURGEABLE allow-list. These are the only rows
+// that can be deleted. A live holding (manual_hold, running, scheduled,
+// adding, partial...) still holds real tickets upstream, so it gets NO delete
+// button — it must go through "Remove tickets" first.
+const DELETABLE_STATUS = ['removed', 'failed', 'remove_failed', 'no_availability', 'stopped', 'auto_stopped'];
+const canDelete = (h) => DELETABLE_STATUS.includes(h?.status);
+// The cross, or nothing at all on a live holding.
+const deleteButton = (h) => (canDelete(h)
+  ? `<button class="table-action icon-only danger" data-purge="${h.id}" type="button" title="Delete holding #${h.id}" aria-label="Delete holding #${h.id}, ${esc(fmtD(h.local_date))} ${esc(h.local_time)}, ${esc(statusLabel(h.status))}">${I.x}</button>`
+  : '');
 
 function renderHoldingsTable() {
   const body = $('#holdingsTable tbody');
@@ -553,12 +564,9 @@ function renderHoldingsTable() {
     const sub = isTerminal(h)
       ? `OccID ${h.timetable_id} · was ${h.requested_quantity} wanted · ${esc(statusLabel(h.status))}`
       : `OccID ${h.timetable_id} · want ${h.requested_quantity} · in cart ${added} · ${esc(modeLabel(h))}`;
-    const xTitle = h.status === 'removed'
-      ? 'Delete permanently'
-      : `Delete this stale holding (#${h.id})`;
     return `<tr><td><strong>${fmtD(h.local_date)} ${esc(h.local_time)}</strong><span class="sub-cell">${sub}</span><span class="sub-cell">Auto stop ${esc(h.auto_stop_madrid || '—')}</span></td>
       <td><span class="status-badge status-${badgeFor(h.status)}">${esc(statusLabel(h.status))}</span></td>
-      <td class="actions-cell"><button class="table-action" type="button" data-view="${h.id}">${I.eye}View</button><button class="table-action icon-only danger" data-purge="${h.id}" type="button" title="${esc(xTitle)}" aria-label="${esc(xTitle)}">${I.x}</button></td></tr>`;
+      <td class="actions-cell"><button class="table-action" type="button" data-view="${h.id}">${I.eye}View</button>${deleteButton(h)}</td></tr>`;
   };
 
   if (state.ui.group !== 'date') { body.innerHTML = list.map(rowFor).join(''); return; }
