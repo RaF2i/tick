@@ -87,13 +87,15 @@ function clientIp(req) {
 function loginLocked(ip) {
   const e = loginFails.get(ip);
   if (!e) return false;
+  if (e.n < LOGIN_MAX_FAILS) return false;
   if (Date.now() >= e.until) { loginFails.delete(ip); return false; }
   return true;
 }
 function noteLoginFail(ip) {
   const e = loginFails.get(ip) || { n: 0, until: 0 };
   e.n += 1;
-  if (e.n >= LOGIN_MAX_FAILS) e.until = Date.now() + LOGIN_LOCK_MS;
+  // Sliding window: each further failure restarts the lockout.
+  e.until = Date.now() + LOGIN_LOCK_MS;
   loginFails.set(ip, e);
   if (loginFails.size > 5000) loginFails.clear();
 }
