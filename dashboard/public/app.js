@@ -20,6 +20,7 @@ function openAddDrawer() {
   if (drawerCloseTimer) { clearTimeout(drawerCloseTimer); drawerCloseTimer = null; }
   addDrawer.classList.remove('closing');
   if (!addDrawer.open) addDrawer.showModal();
+  updateRunQueueCaution();
 }
 function closeAddDrawer() {
   if (!addDrawer.open) return;
@@ -315,9 +316,11 @@ function renderSlots(d) {
     const ok = s.active && a > 0;
     const st = !s.active ? 'Off' : a === 0 || s.fullyBooked ? 'Full' : 'Open';
     return `<div class="slot-card" data-card="${s.id}">
-      <strong>${esc(s.start)}</strong>
+      <div class="slot-head">
+        <strong>${esc(s.start)}</strong>
+        <span class="status-badge status-${st === 'Open' ? 'open' : st === 'Full' ? 'danger' : 'muted'}">${st}</span>
+      </div>
       <span class="slot-avail">${a} avail · cap ${s.capacity}</span>
-      <span class="status-badge status-${st === 'Open' ? 'open' : st === 'Full' ? 'danger' : 'muted'}">${st}</span>
       <div class="slot-actions">
         <button class="button button-primary button-small" type="button" data-slot="${s.id}" ${ok ? '' : 'disabled'}>${I.plus}Add to cart</button>
       </div>
@@ -482,6 +485,28 @@ function modeLabel(h) {
   return h.auto_enabled ? `AUTO · every ${h.repeat_minutes || 30}m` : 'Manual';
 }
 
+function updateRunQueueCaution() {
+  const s = state.scheduler;
+  const running = Number(s?.runningCount ?? 0);
+  const due = Number(s?.dueCount ?? 0);
+  const busyText = running > 0
+    ? 'Wait — auto run in progress'
+    : due > 0 ? `Wait — ${due} due for next auto run` : '';
+
+  // Top bar: only draw attention when the queue is actually busy.
+  const chip = document.getElementById('runQueueCaution');
+  if (chip) {
+    if (busyText) { chip.textContent = busyText; chip.classList.remove('hidden'); }
+    else { chip.textContent = ''; chip.classList.add('hidden'); }
+  }
+
+  // Drawer: always keep a short caution visible at the top.
+  const banner = document.getElementById('runQueueCautionDrawer');
+  if (banner) {
+    banner.textContent = busyText || 'Check the run queue — wait between auto runs before starting a new one.';
+    banner.classList.remove('hidden');
+  }
+}
 function renderHoldings() {
   const live = state.holdings.filter((h) => !isTerminal(h));
   $('#metricActive').textContent = live.length;
@@ -503,14 +528,17 @@ function renderHoldings() {
     : (due > 0 ? `Auto OFF · ${due} due — start auto` : 'Manual mode');
   const sorted = [...live].sort((a, b) => String(a.next_run_at || '~').localeCompare(String(b.next_run_at || '~')));
   $('#nextUp').innerHTML = sorted.map((h) => {
-    const when = h.auto_enabled ? (h.next_run_at ? `${fmtDT(h.next_run_at)} ${TZ_SHORT}` : 'scheduled') : 'manual — no runs';
-    const live = h.auto_enabled && h.next_run_at && !isTerminal(h)
+    const isAuto = h.auto_enabled && !isTerminal(h);
+    const liveCd = (isAuto && h.next_run_at)
       ? `${I.clock}<span class="countdown" data-next="${esc(h.next_run_at)}" title="Next run ${esc(fmtDT(h.next_run_at))} ${TZ_SHORT}">${esc(countdownText(h.next_run_at))}</span>`
       : '';
+    const stateTxt = isTerminal(h) ? '' : (h.auto_enabled ? (h.next_run_at ? '' : 'scheduled') : 'manual — no runs');
+    const tail = [liveCd, stateTxt ? esc(stateTxt) : '', `stop ${esc(h.auto_stop_madrid || '—')}`].filter(Boolean).join(' · ');
     return `<div class="next-row">
-      <div class="next-top"><strong>${esc(fmtD(h.local_date))} ${esc(h.local_time)}</strong><span class="next-actions"><span class="status-badge status-${badgeFor(h.status)}">${esc(statusLabel(h.status))}</span>${canDelete(h) ? `<button class="row-x" type="button" data-purge="${h.id}" title="Delete holding #${h.id}" aria-label="Delete holding #${h.id}, ${esc(fmtD(h.local_date))} ${esc(h.local_time)}, ${esc(statusLabel(h.status))}">${I.x}</button>` : ''}</span></div>
-      <span class="next-sub">OccID ${h.timetable_id} · ${esc(modeLabel(h))}</span>
-      <span class="next-sub mono">${when}${live ? ` · ${live}` : ''} · stop ${esc(h.auto_stop_madrid || '—')}</span>
+      <div class="next-text"><strong>${esc(fmtD(h.local_date))} ${esc(h.local_time)}</strong>
+      <span class="next-sub">${esc(modeLabel(h))}</span>
+      <span class="next-sub mono">${tail}</span></div>
+      <span class="next-actions"><span class="status-badge status-${badgeFor(h.status)}">${esc(statusLabel(h.status))}</span>${canDelete(h) ? `<button class="row-x" type="button" data-purge="${h.id}" title="Delete holding #${h.id}" aria-label="Delete holding #${h.id}, ${esc(fmtD(h.local_date))} ${esc(h.local_time)}, ${esc(statusLabel(h.status))}">${I.x}</button>` : ''}</span>
     </div>`;
   }).join('') || `<div class="empty-preview">${state.holdings.length ? 'No active holdings.' : 'No holdings yet — press + in the rail to start one.'}</div>`;
   const qc = $('#queueCount');
@@ -562,9 +590,9 @@ function renderHoldingsTable() {
   const rowFor = (h) => {
     const added = h.status === 'removed' ? 0 : activeQtyOf(h);
     const sub = isTerminal(h)
-      ? `OccID ${h.timetable_id} · was ${h.requested_quantity} wanted · ${esc(statusLabel(h.status))}`
-      : `OccID ${h.timetable_id} · want ${h.requested_quantity} · in cart ${added} · ${esc(modeLabel(h))}`;
-    return `<tr><td><strong>${fmtD(h.local_date)} ${esc(h.local_time)}</strong><span class="sub-cell">${sub}</span><span class="sub-cell">Auto stop ${esc(h.auto_stop_madrid || '—')}</span></td>
+      ? `was ${h.requested_quantity} wanted · ${esc(statusLabel(h.status))}`
+      : `in cart ${added} · ${esc(modeLabel(h))}`;
+    return `<tr data-view="${h.id}"><td><strong>${fmtD(h.local_date)} ${esc(h.local_time)}</strong><span class="sub-cell">${sub}</span><span class="sub-cell">Auto stop ${esc(h.auto_stop_madrid || '—')}</span></td>
       <td><span class="status-badge status-${badgeFor(h.status)}">${esc(statusLabel(h.status))}</span></td>
       <td class="actions-cell"><button class="table-action" type="button" data-view="${h.id}">${I.eye}View</button>${deleteButton(h)}</td></tr>`;
   };
@@ -859,7 +887,7 @@ function syncHoldingButtons(h) {
   const removed = h.status === 'removed';
   const stopped = h.status === 'stopped' || h.status === 'auto_stopped';
   const rb = $('#holdingRefresh');
-  if (rb.dataset.loading !== 'true') { rb.disabled = !h.remote_cart_id; rb.innerHTML = `${I.refresh}Refresh cart`; }
+  if (rb && rb.dataset.loading !== 'true') { rb.disabled = !h.remote_cart_id; rb.innerHTML = `${I.refresh}Refresh cart`; }
   const ab = $('#holdingAuto');
   if (ab.dataset.loading !== 'true') { ab.disabled = removed; ab.innerHTML = h.auto_enabled ? `${I.zap}Auto: ON` : `${I.zap}Auto: OFF`; }
   $('#holdingStop').disabled = removed || stopped;
@@ -1009,6 +1037,7 @@ async function loadHoldings(opts = {}) {
     state.holdingsEverLoaded = true;
     state.holdingsFailed = false;
     renderHoldings();
+    updateRunQueueCaution();
     // Keep the open detail page in sync with polls + auto re-adds. It needs the
     // full record, which the lean list no longer carries.
     if (isHoldingOpen() && state.holding && refreshBtn.dataset.loading !== 'true') {
@@ -1108,6 +1137,49 @@ slotStopTime.addEventListener('change', updateStopHint);
 $('#slotStopDefault').addEventListener('click', setDefaultStopInputs);
 $('#slotForm').addEventListener('submit', confirmSlot);
 
+// ---- Sidebar: hamburger collapses it on desktop, slide-over on mobile ----
+const sidebar = $('#sidebar'), scrim = $('#scrim'), menuBtn = $('#menuBtn');
+const appShell = document.querySelector('.app-shell');
+function isMobileNav() { return window.matchMedia('(max-width: 800px)').matches; }
+function setSidebar(open) {
+  if (!sidebar) return;
+  if (isMobileNav()) {
+    sidebar.classList.toggle('open', open);
+    if (scrim) scrim.hidden = !open;
+  } else {
+    appShell?.classList.toggle('nav-collapsed', !open);
+    if (scrim) scrim.hidden = true;
+  }
+  menuBtn?.setAttribute('aria-expanded', String(open));
+  menuBtn?.setAttribute('aria-label', open ? 'Close menu' : 'Open menu');
+}
+function isSidebarOpen() {
+  return isMobileNav()
+    ? Boolean(sidebar?.classList.contains('open'))
+    : !Boolean(appShell?.classList.contains('nav-collapsed'));
+}
+menuBtn?.addEventListener('click', () => setSidebar(!isSidebarOpen()));
+scrim?.addEventListener('click', () => setSidebar(false));
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && sidebar?.classList.contains('open') && isMobileNav()) setSidebar(false);
+  if ((e.key === '+' || (e.key.toLowerCase() === 'n' && (e.ctrlKey || e.metaKey))) && !addDrawer.open) { /* keep native */ }
+});
+sidebar?.addEventListener('click', (e) => {
+  if (isMobileNav() && e.target.closest('.rail-btn')) setSidebar(false);
+});
+window.matchMedia('(max-width: 800px)').addEventListener?.('change', () => {
+  sidebar?.classList.remove('open');
+  appShell?.classList.remove('nav-collapsed');
+  if (scrim) scrim.hidden = true;
+  menuBtn?.setAttribute('aria-expanded', 'true');
+});
+// Press "+" anywhere (not typing) to open the New-hold drawer.
+document.addEventListener('keydown', (e) => {
+  const tag = String(e.target?.tagName || '').toLowerCase();
+  if (tag === 'input' || tag === 'textarea' || e.target?.isContentEditable) return;
+  if (e.key === '+' && !addDrawer.open) { e.preventDefault(); openAddDrawer(); }
+});
+
 // ---- Drawer wiring (rail +, close button, Cancel, Esc, scrim) ----
 $('#openAddDrawer').addEventListener('click', openAddDrawer);
 $('#addDrawerClose').addEventListener('click', closeAddDrawer);
@@ -1163,7 +1235,7 @@ $('#holdingsTable tbody').addEventListener('click', async (e) => {
   try { const d = await api(`/api/holdings/${v.dataset.view}`); openHolding(d.holding); } catch (err) { showNotice(err.message, 'error'); }
   finally { v.disabled = false; }
 });
-$('#holdingRefresh').addEventListener('click', refreshHoldingCart);
+$('#holdingRefresh')?.addEventListener('click', refreshHoldingCart);
 $('#holdingAuto').addEventListener('click', () => holdingAction('auto'));
 $('#holdingBody').addEventListener('click', (e) => {
   const h = state.holding;
@@ -1223,6 +1295,12 @@ async function saveHoldingAutoStop(reset) {
 $('#holdingStop').addEventListener('click', () => holdingAction('stop'));
 $('#holdingRemove').addEventListener('click', () => holdingAction('remove'));
 $('#holdingBack').addEventListener('click', () => { closeHolding(); loadHoldings({ silent: true }); });
+$('#brandHome').addEventListener('click', () => {
+  closeAddDrawer();
+  closeConfirm();
+  closeHolding();
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+});
 $('#refreshHoldings').addEventListener('click', () => loadHoldings({ force: true }));
 $('#refreshActivity').addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); loadActivity(); loadLogs(); });
 $('#refreshLogs').addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); loadLogs(); });
