@@ -76,6 +76,27 @@ function checkPassword(guess) {
   const b = createHash('sha256').update(DASHBOARD_PASSWORD).digest();
   return timingSafeEqual(a, b);
 }
+// Throttle password guesses per client IP. Without this the login is an
+// unthrottled oracle whenever the dashboard is reachable from the internet.
+const LOGIN_MAX_FAILS = Number(process.env.LOGIN_MAX_FAILS || 5);
+const LOGIN_LOCK_MS = Number(process.env.LOGIN_LOCK_MS || 15 * 60 * 1000);
+const loginFails = new Map();
+function clientIp(req) {
+  return String(req.socket?.remoteAddress || 'unknown');
+}
+function loginLocked(ip) {
+  const e = loginFails.get(ip);
+  if (!e) return false;
+  if (Date.now() >= e.until) { loginFails.delete(ip); return false; }
+  return true;
+}
+function noteLoginFail(ip) {
+  const e = loginFails.get(ip) || { n: 0, until: 0 };
+  e.n += 1;
+  if (e.n >= LOGIN_MAX_FAILS) e.until = Date.now() + LOGIN_LOCK_MS;
+  loginFails.set(ip, e);
+  if (loginFails.size > 5000) loginFails.clear();
+}
 function parseCookies(req) {
   const out = {};
   for (const part of String(req.headers.cookie || '').split(';')) {
@@ -1358,11 +1379,18 @@ async function serveStatic(req, res, url) {
 // Returns true to continue to the app, false when it already responded.
 async function guardAuth(req, res, url) {
   if (url.pathname === '/api/login' && req.method === 'POST') {
+    const ip = clientIp(req);
+    if (loginLocked(ip)) {
+      logLine(`AUTH login throttled ip=${ip}`);
+      return (sendJson(res, 429, { error: 'Too many attempts. Try again later.' }), false);
+    }
     const body = await readJsonBody(req);
     if (!checkPassword(body.password)) {
-      logLine('AUTH web login failed');
+      noteLoginFail(ip);
+      logLine(`AUTH web login failed ip=${ip}`);
       return (sendJson(res, 401, { error: 'Wrong password.' }), false);
     }
+    loginFails.delete(ip);
     if (sessions.size > 500) sessions.clear();
     const token = randomBytes(32).toString('hex');
     sessions.add(token);
