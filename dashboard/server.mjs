@@ -82,7 +82,17 @@ const LOGIN_MAX_FAILS = Number(process.env.LOGIN_MAX_FAILS || 5);
 const LOGIN_LOCK_MS = Number(process.env.LOGIN_LOCK_MS || 15 * 60 * 1000);
 const loginFails = new Map();
 function clientIp(req) {
-  return String(req.socket?.remoteAddress || 'unknown');
+  const sock = String(req.socket?.remoteAddress || '');
+  const loopback = sock === '127.0.0.1' || sock === '::1' || sock === '::ffff:127.0.0.1';
+  // Behind a reverse proxy every request arrives from loopback, so the socket
+  // address alone would make the throttle one global bucket for all users.
+  // Only honour X-Forwarded-For when it really is a loopback peer: the app port
+  // is not reachable from outside, so no client can spoof it directly.
+  if (loopback) {
+    const first = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+    if (first) return first;
+  }
+  return sock || 'unknown';
 }
 function loginLocked(ip) {
   const e = loginFails.get(ip);
