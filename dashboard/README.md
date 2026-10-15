@@ -2,8 +2,8 @@
 
 This is the first dashboard/controller slice. It uses Node's built-in HTTP server and SQLite. The recurring 30-minute worker is intentionally disabled.
 
-> **See [HOSTING.md](./HOSTING.md)** for deployment: the systemd unit, a pm2
-> command map, a fresh-server setup guide, backups, and troubleshooting.
+> **See [HOSTING.md](./HOSTING.md)** for deployment: the systemd unit, a command
+> reference, fresh-server setup, backups, and troubleshooting.
 
 ## Requirements
 
