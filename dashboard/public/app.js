@@ -69,6 +69,12 @@ const I = {
 const ICONS = { info: I.info, success: I.check, error: I.x };
 function showNotice(m, t = 'info') {
   const box = $('#toasts');
+  // A modal <dialog> is promoted to the top layer, above every z-index. Park the
+  // toast stack inside whichever dialog is open, or it renders behind the
+  // backdrop exactly when the add-holding drawer is reporting success or failure.
+  const openDialog = [...document.querySelectorAll('dialog[open]')].pop();
+  const host = openDialog || document.body;
+  if (box.parentElement !== host) host.appendChild(box);
   while (box.children.length >= 4) box.firstChild.remove();
   const el = document.createElement('div');
   el.className = `toast toast-${t}`;
@@ -77,6 +83,15 @@ function showNotice(m, t = 'info') {
   box.appendChild(el);
   setTimeout(() => { el.classList.add('toast-out'); setTimeout(() => el.remove(), 250); }, t === 'error' ? 7000 : 4500);
 }
+
+// A closed <dialog> is display:none, so a toast left inside it would vanish the
+// moment the drawer auto-closes. Pull the stack back out to <body>.
+document.addEventListener('close', (e) => {
+  const box = $('#toasts');
+  if (box && e.target instanceof HTMLDialogElement && box.parentElement === e.target) {
+    document.body.appendChild(box);
+  }
+}, true);
 
 // fetch with timeout + offline-friendly errors
 async function api(p, o = {}) {
