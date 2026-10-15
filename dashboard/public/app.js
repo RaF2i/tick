@@ -530,10 +530,11 @@ function renderHoldings() {
   $('#nextUp').innerHTML = sorted.map((h) => {
     const isAuto = h.auto_enabled && !isTerminal(h);
     const liveCd = (isAuto && h.next_run_at)
-      ? `${I.clock}<span class="countdown" data-next="${esc(h.next_run_at)}" title="Next run ${esc(fmtDT(h.next_run_at))} ${TZ_SHORT}">${esc(countdownText(h.next_run_at))}</span>`
+      ? `<span class="cd" title="Next run ${esc(fmtDT(h.next_run_at))} ${TZ_SHORT}">${I.clock}<span class="countdown" data-next="${esc(h.next_run_at)}">${esc(countdownText(h.next_run_at))}</span></span>`
       : '';
     const stateTxt = isTerminal(h) ? '' : (h.auto_enabled ? (h.next_run_at ? '' : 'scheduled') : 'manual — no runs');
-    const tail = [liveCd, stateTxt ? esc(stateTxt) : '', `stop ${esc(h.auto_stop_madrid || '—')}`].filter(Boolean).join(' · ');
+    const tail = [liveCd, stateTxt ? `<span>${esc(stateTxt)}</span>` : '', `<span>stop ${esc(h.auto_stop_madrid || '—')}</span>`]
+      .filter(Boolean).join('<span class="sep" aria-hidden="true"></span>');
     return `<div class="next-row">
       <div class="next-text"><strong>${esc(fmtD(h.local_date))} ${esc(h.local_time)}</strong>
       <span class="next-sub">${esc(modeLabel(h))}</span>
