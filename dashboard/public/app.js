@@ -21,6 +21,7 @@ function openAddDrawer() {
   addDrawer.classList.remove('closing');
   if (!addDrawer.open) addDrawer.showModal();
   updateRunQueueCaution();
+  updateSlotWait();
 }
 function closeAddDrawer() {
   if (!addDrawer.open) return;
@@ -38,6 +39,7 @@ function resetSlotConfirm() {
   slotConfirmBtn.disabled = true;
   $('#step3')?.classList.remove('active');
   $('#slotError')?.classList.add('hidden');
+  $('#slotWait')?.classList.add('hidden');
   if ($('#slotChunks')) $('#slotChunks').innerHTML = '';
 }
 
@@ -253,6 +255,30 @@ function countdownText(iso) {
   if (h > 0) return `in ${h}h ${pad(m)}m`;
   return `in ${pad(m)}:${pad(sec)}`;
 }
+// Seconds left before a new holding may be created (0 = the gate is open).
+// The server sends an absolute deadline, so a stale poll cannot reopen it early.
+function addWaitLeft() {
+  const s = state.scheduler;
+  if (!s?.addWaitUntil) return 0;
+  const left = Math.round((Date.parse(s.addWaitUntil) - Date.now()) / 1000);
+  return Number.isFinite(left) && left > 0 ? left : 0;
+}
+
+// Live "wait Ns" line inside the create drawer.
+function updateSlotWait() {
+  const el = document.getElementById('slotWait');
+  if (!el) return;
+  const left = addWaitLeft();
+  if (left > 0) {
+    const why = state.scheduler?.addWaitReason;
+    el.innerHTML = `Wait <strong>${left}s</strong> before adding a new holding${why ? ` — ${esc(why)}` : ''}.`;
+    el.classList.remove('hidden');
+  } else {
+    el.classList.add('hidden');
+    el.textContent = '';
+  }
+}
+
 // Refresh every [data-next] countdown on the page each second (no re-render)
 function tickCountdowns() {
   document.querySelectorAll('[data-next]').forEach((el) => {
@@ -265,6 +291,7 @@ function tickCountdowns() {
   if (state.scheduler) {
     const info = document.getElementById('tickInfo');
     if (info) info.textContent = `every ${Math.round((state.scheduler.tickIntervalMs || 15000) / 1000)}s`;
+    if (addDrawer.open) updateSlotWait();
     updateRunQueueCaution();
   }
 }
@@ -439,6 +466,14 @@ async function confirmSlot(e) {
     return;
   }
   const btn = $('#slotConfirm');
+  // A new holding runs immediately, so never let one start on top of a run
+  // that just happened or is about to fire (the server enforces this too).
+  const wait = addWaitLeft();
+  if (wait > 0) {
+    updateSlotWait();
+    showNotice(`Wait ${wait}s before adding a new holding — ${state.scheduler?.addWaitReason || 'the run queue is busy'}.`, 'error');
+    return;
+  }
   setBtn(btn, true, 'Adding…');
   slotForm.dataset.busy = 'true';
   try {

@@ -73,6 +73,9 @@ const IP_BLOCK_COOLDOWN_SEC = Math.max(60, Number(process.env.IP_BLOCK_COOLDOWN_
 // Minimum gap between any two provider calls, so a burst of holdings cannot
 // leave as a spike.
 const MIN_CALL_GAP_MS = Math.max(0, Number(process.env.MIN_CALL_GAP_MS || 500));
+// A new holding fires a run immediately, so creating one must not land on top
+// of an existing run. Keep this many seconds clear around any auto run.
+const ADD_GAP_SEC = Math.max(0, Number(process.env.ADD_GAP_SEC || 60));
 let providerCooldownUntil = 0;
 let providerStrikes = 0;
 let lastProviderPressureAt = 0;
@@ -1116,7 +1119,53 @@ function sendJson(res, status, payload) {
   res.end(body);
 }
 
+// Creating a holding triggers an immediate run, so it must not stack onto a run
+// that just happened or one that is about to fire. Returns how long the "add"
+// button should stay closed, and why, so the UI can show a live countdown.
+function addWindow() {
+  const gapMs = ADD_GAP_SEC * 1000;
+  if (!gapMs) return { waitSec: 0, waitUntil: null, reason: null };
+  const now = Date.now();
+  let until = 0;
+  let reason = null;
+  const push = (at, why) => {
+    if (at > until) { until = at; reason = why; }
+  };
+
+  if (runningJobs.size > 0) push(now + gapMs, 'a run is in progress right now');
+
+  try {
+    const last = db.prepare('SELECT finished_at FROM runs ORDER BY id DESC LIMIT 1').get();
+    const at = last?.finished_at ? Date.parse(last.finished_at) : 0;
+    if (at && now - at < gapMs) {
+      push(at + gapMs, `the last run finished ${Math.max(0, Math.round((now - at) / 1000))}s ago`);
+    }
+  } catch { /* ignore */ }
+
+  try {
+    // Include overdue holdings: the next tick will pick them up within a tick.
+    const soon = db.prepare(`
+      SELECT MIN(next_run_at) AS at FROM holdings
+      WHERE auto_enabled = 1 AND status NOT IN ('stopped','auto_stopped','removed','removing')
+      AND next_run_at IS NOT NULL AND next_run_at <= ?
+    `).get(new Date(now + gapMs).toISOString());
+    const at = soon?.at ? Date.parse(soon.at) : 0;
+    if (at) {
+      if (at <= now) push(now + TICK_INTERVAL_MS + gapMs, 'an auto run is due now');
+      else push(at + gapMs, `next auto run in ${Math.max(1, Math.round((at - now) / 1000))}s`);
+    }
+  } catch { /* ignore */ }
+
+  const waitSec = Math.max(0, Math.ceil((until - now) / 1000));
+  return {
+    waitSec,
+    waitUntil: waitSec ? new Date(until).toISOString() : null,
+    reason: waitSec ? reason : null,
+  };
+}
+
 function getSchedulerStatus() {
+  const addGate = addWindow();
   const due = db.prepare(`
     SELECT COUNT(*) AS c FROM holdings
     WHERE auto_enabled = 1 AND status NOT IN ('stopped','auto_stopped','removed','removing')
@@ -1132,6 +1181,10 @@ function getSchedulerStatus() {
     cooldownSec: providerCooldownLeft(),
     cooldownUntil: providerCooldownUntil ? new Date(providerCooldownUntil).toISOString() : null,
     providerStrikes,
+    addGapSec: ADD_GAP_SEC,
+    addWaitSec: addGate.waitSec,
+    addWaitUntil: addGate.waitUntil,
+    addWaitReason: addGate.reason,
   };
 }
 
@@ -1187,6 +1240,16 @@ async function handleApi(req, res, url) {
     return sendJson(res, 200, await fetchAvailability(String(body.date || ''), null, null, true));
   }
   if (req.method === 'POST' && url.pathname === '/api/holdings') {
+    // A new holding runs immediately, so refuse to start one on top of an
+    // existing run. 429 + the seconds left so the UI can count down.
+    const gate = addWindow();
+    if (gate.waitSec > 0) {
+      throw errorWithStatus(
+        `Wait ${gate.waitSec}s before adding a new holding — ${gate.reason}.`,
+        429,
+        { waitSec: gate.waitSec, waitUntil: gate.waitUntil, reason: gate.reason }
+      );
+    }
     const body = await readJsonBody(req);
     const holding = await createHolding(body);
     logLine(`CREATE #${holding.id}: ${body.date} ${body.time} occ=${body.timetableId} qty=${body.quantity} auto=${Boolean(body.autoEnabled)}`);
