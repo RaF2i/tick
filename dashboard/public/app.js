@@ -238,31 +238,15 @@ function stopWhen(dateStr, timeStr, isDefault) {
   };
 }
 
-// Live seconds left on the provider cooldown (0 = not paused).
-function providerPausedSec() {
-  const s = state.scheduler;
-  if (!s) return 0;
-  if (s.cooldownUntil) {
-    const left = Math.round((Date.parse(s.cooldownUntil) - Date.now()) / 1000);
-    return Number.isFinite(left) && left > 0 ? left : 0;
-  }
-  return Number(s.cooldownSec || 0);
-}
-
-// Human duration for the provider cooldown ("54m", "1h 12m").
-function cooldownText(sec) {
-  const s = Math.max(0, Math.round(Number(sec) || 0));
-  if (s >= 3600) return `${Math.floor(s / 3600)}h ${Math.round((s % 3600) / 60)}m`;
-  if (s >= 60) return `${Math.round(s / 60)}m`;
-  return `${s}s`;
-}
+// Manual actions always reach the provider now, so the UI no longer renders a
+// "paused" state. The scheduler's own cooldown stays visible in the tick tooltip.
 
 // Live countdown text for a next_run_at timestamp
 function countdownText(iso) {
   if (!iso) return '—';
   const diff = new Date(iso).getTime() - Date.now();
   if (Number.isNaN(diff)) return '—';
-  if (diff <= 0) return providerPausedSec() > 0 ? 'paused' : 'due now';
+  if (diff <= 0) return 'due now';
   const s = Math.floor(diff / 1000);
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
   const pad = (n) => String(n).padStart(2, '0');
@@ -277,15 +261,10 @@ function tickCountdowns() {
   document.querySelectorAll('[data-stop-when]').forEach((el) => {
     el.textContent = relFromNow(Number(el.dataset.stopWhen));
   });
-  // Keep the provider-cooldown text live without a full reload.
+  // Keep the tick info text live without a full reload.
   if (state.scheduler) {
-    const cool = providerPausedSec();
     const info = document.getElementById('tickInfo');
-    if (info) {
-      info.textContent = cool > 0
-        ? `paused · ${cooldownText(cool)}`
-        : `every ${Math.round((state.scheduler.tickIntervalMs || 15000) / 1000)}s`;
-    }
+    if (info) info.textContent = `every ${Math.round((state.scheduler.tickIntervalMs || 15000) / 1000)}s`;
     updateRunQueueCaution();
   }
 }
@@ -534,12 +513,9 @@ function updateRunQueueCaution() {
   const s = state.scheduler;
   const running = Number(s?.runningCount ?? 0);
   const due = Number(s?.dueCount ?? 0);
-  const cool = providerPausedSec();
-  const busyText = cool > 0
-    ? `Paused — provider cooldown ${cooldownText(cool)} left`
-    : running > 0
-      ? 'Wait — auto run in progress'
-      : due > 0 ? `Wait — ${due} due for next auto run` : '';
+  const busyText = running > 0
+    ? 'Wait — auto run in progress'
+    : due > 0 ? `Wait — ${due} due for next auto run` : '';
 
   // Top bar: only draw attention when the queue is actually busy.
   const chip = document.getElementById('runQueueCaution');
@@ -562,23 +538,18 @@ function renderHoldings() {
     .filter((h) => h.status !== 'removed')
     .reduce((a, h) => a + activeQtyOf(h), 0);
   const due = state.scheduler?.dueCount ?? 0;
-  const cool = providerPausedSec();
   $('#metricDue').textContent = due;
-  const tickTxt = cool > 0
-    ? `paused · ${cooldownText(cool)}`
-    : state.scheduler ? `every ${Math.round((state.scheduler.tickIntervalMs || 15000) / 1000)}s` : '—';
+  const tickTxt = state.scheduler ? `every ${Math.round((state.scheduler.tickIntervalMs || 15000) / 1000)}s` : '—';
   $('#tickInfo').textContent = tickTxt;
   $('#tickInfo').title = state.scheduler?.lastTickResult || '';
-  $('#autoPill').textContent = cool > 0 ? 'Auto: PAUSED' : `Auto: ${state.scheduler?.enabled ? 'ON' : 'OFF'}`;
+  $('#autoPill').textContent = `Auto: ${state.scheduler?.enabled ? 'ON' : 'OFF'}`;
   const autoBtn = $('#autoToggle');
   if (autoBtn.dataset.loading !== 'true') autoBtn.innerHTML = state.scheduler?.enabled ? `${I.pause}Stop auto` : `${I.play}Start auto`;
   const liveCount = live.length;
   const exec = state.scheduler?.runningCount ?? 0;
-  $('#sideStatus').textContent = cool > 0
-    ? `Paused · provider cooldown ${cooldownText(cool)}`
-    : state.scheduler?.enabled
-      ? `Auto ON · ${liveCount} holding${liveCount === 1 ? '' : 's'}${exec ? ` · ${exec} executing` : ''}`
-      : (due > 0 ? `Auto OFF · ${due} due — start auto` : 'Manual mode');
+  $('#sideStatus').textContent = state.scheduler?.enabled
+    ? `Auto ON · ${liveCount} holding${liveCount === 1 ? '' : 's'}${exec ? ` · ${exec} executing` : ''}`
+    : (due > 0 ? `Auto OFF · ${due} due — start auto` : 'Manual mode');
   const sorted = [...live].sort((a, b) => String(a.next_run_at || '~').localeCompare(String(b.next_run_at || '~')));
   $('#nextUp').innerHTML = sorted.map((h) => {
     const isAuto = h.auto_enabled && !isTerminal(h);

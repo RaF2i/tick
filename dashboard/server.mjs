@@ -448,7 +448,14 @@ function providerCooling() {
 function providerCooldownLeft() {
   return Math.max(0, Math.ceil((providerCooldownUntil - Date.now()) / 1000));
 }
-function noteProviderPressure(kind) {
+function noteProviderPressure(kind, { escalate = true } = {}) {
+  const label = kind === 'ip_block' ? 'IP BLOCK' : 'RATE LIMIT';
+  // A manual probe is the user asking "is it still blocked?". Report the answer,
+  // but never let a click extend the cooldown that protects the scheduler.
+  if (!escalate) {
+    logLine(`PROVIDER ${label} (manual test): provider still refusing — timer unchanged, ${providerCooldownLeft()}s left`);
+    return;
+  }
   providerStrikes += 1;
   lastProviderPressureAt = Date.now();
   const sec = kind === 'ip_block'
@@ -457,12 +464,23 @@ function noteProviderPressure(kind) {
   const until = Date.now() + sec * 1000;
   if (until > providerCooldownUntil) providerCooldownUntil = until;
   saveProviderState();
-  logLine(`PROVIDER ${kind === 'ip_block' ? 'IP BLOCK' : 'RATE LIMIT'}: all automation paused ${sec}s (strike ${providerStrikes})`);
+  logLine(`PROVIDER ${label}: all automation paused ${sec}s (strike ${providerStrikes})`);
 }
 // One success does not cancel a cooldown — otherwise auth succeeding and the
 // next call being throttled would reset the streak on every tick. Strikes only
-// decay after 5 quiet minutes.
-function noteProviderOk() {
+// decay after 5 quiet minutes. A successful manual probe is different: that is
+// direct evidence the block is gone, so it clears the pause immediately.
+function noteProviderOk({ force = false } = {}) {
+  if (force) {
+    if (providerStrikes || providerCooldownUntil) {
+      logLine(`PROVIDER ok (manual test): provider answered normally — cooldown cleared (strike ${providerStrikes}, ${providerCooldownLeft()}s were left)`);
+      providerStrikes = 0;
+      providerCooldownUntil = 0;
+      lastProviderPressureAt = 0;
+      saveProviderState();
+    }
+    return;
+  }
   const quietFor = Date.now() - lastProviderPressureAt;
   if (providerStrikes > 0 && quietFor > 5 * 60 * 1000) {
     logLine(`PROVIDER ok: no pressure for ${Math.round(quietFor / 60000)}m, strikes reset`);
@@ -493,16 +511,9 @@ function saveProviderState() {
     up.run('provider_last_pressure', new Date(lastProviderPressureAt || 0).toISOString(), now);
   } catch { /* ignore */ }
 }
-// Manual actions hit the same provider, so they must not be allowed to deepen
-// an active block. Fail fast with a message the UI can show in a toast.
-function assertProviderReady(action) {
-  if (!providerCooling()) return;
-  const mins = Math.max(1, Math.ceil(providerCooldownLeft() / 60));
-  throw errorWithStatus(
-    `Provider cooldown active — ${action} needs the provider, which is currently blocking this server. Try again in about ${mins} min.`,
-    429
-  );
-}
+// Manual actions are deliberately NOT blocked by the breaker: pressing a button
+// is the only way to see what the provider actually answers right now. They pass
+// probe=true so a refusal cannot deepen the cooldown (see noteProviderPressure).
 // Space every outbound call at least MIN_CALL_GAP_MS apart.
 async function providerSlot() {
   const now = Date.now();
@@ -532,7 +543,7 @@ async function readResponse(res) {
   }
 }
 
-async function apiRequest({ method, path, token = null, body = undefined, holdingId = null }) {
+async function apiRequest({ method, path, token = null, body = undefined, holdingId = null, probe = false }) {
   const endpoint = `${API_BASE}${path}`;
   const headers = { Accept: 'application/json' };
   if (body !== undefined) headers['Content-Type'] = 'application/json';
@@ -557,11 +568,11 @@ async function apiRequest({ method, path, token = null, body = undefined, holdin
   // Classify pressure before anything else so the next holding in this tick
   // already sees the cooldown.
   if (response.status === 429) {
-    noteProviderPressure('rate_limit');
+    noteProviderPressure('rate_limit', { escalate: !probe });
   } else if (response.status === 403 && /IP_BLOCKED|razones de seguridad/i.test(JSON.stringify(payload || ''))) {
-    noteProviderPressure('ip_block');
+    noteProviderPressure('ip_block', { escalate: !probe });
   } else if (response.ok) {
-    noteProviderOk();
+    noteProviderOk({ force: probe });
   }
   recordEvent({
     holdingId,
@@ -584,7 +595,7 @@ async function apiRequest({ method, path, token = null, body = undefined, holdin
   return payload;
 }
 
-async function authenticate() {
+async function authenticate(probe = false) {
   if (!API_KEY) {
     logLine('AUTH fail: no API key configured');
     throw errorWithStatus('SERVITICKETS_API_KEY is not configured on the server.', 500);
@@ -593,6 +604,7 @@ async function authenticate() {
     method: 'POST',
     path: '/places/authenticate',
     body: { api_key: API_KEY },
+    probe,
   });
   if (!payload?.success || !payload.token) {
     logLine('AUTH fail: provider rejected credentials');
@@ -620,15 +632,16 @@ function timeOnly(value) {
   return match ? match[1] : String(value);
 }
 
-async function fetchAvailability(date, holdingId = null, token = null) {
+async function fetchAvailability(date, holdingId = null, token = null, probe = false) {
   const { year, month } = dateParts(date);
   // Reuse the caller's token when provided — one login per run, not two.
-  token = token || await authenticate();
+  token = token || await authenticate(probe);
   const calendar = await apiRequest({
     method: 'GET',
     path: `/visits/${VISIT_ID}/calendar?place_id=${encodeURIComponent(PLACE_ID)}&tour=${TOUR_ID}&month=${month}&year=${year}`,
     token,
     holdingId,
+    probe,
   });
   const calendarData = calendar?.data || {};
   const closedDays = Array.isArray(calendarData.closedDays) ? calendarData.closedDays : [];
@@ -645,6 +658,7 @@ async function fetchAvailability(date, holdingId = null, token = null) {
     path: `/visits/${VISIT_ID}/calendar/day-occupation?place_id=${encodeURIComponent(PLACE_ID)}&tour=${TOUR_ID}&date=${encodeURIComponent(date)}`,
     token,
     holdingId,
+    probe,
   });
   const occupation = occupationResponse?.data || {};
   const timetables = (dayInfo.timetables || []).map((slot) => {
@@ -766,8 +780,8 @@ function parseId(pathPart) {
   return id;
 }
 
-async function showCart(cartId, token, holdingId) {
-  return apiRequest({ method: 'GET', path: `/cart/show/${encodeURIComponent(cartId)}`, token, holdingId });
+async function showCart(cartId, token, holdingId, probe = false) {
+  return apiRequest({ method: 'GET', path: `/cart/show/${encodeURIComponent(cartId)}`, token, holdingId, probe });
 }
 
 function extractCart(payload) {
@@ -808,6 +822,9 @@ async function createHolding(body) {
 
 async function addInitialCart(id, source = 'manual') {
   const holding = getHolding(id);
+  // Anything not driven by the scheduler is a manual probe: it may talk to the
+  // provider during a cooldown, but it must not escalate that cooldown.
+  const probe = source !== 'auto';
   if (['stopped', 'removed', 'remove_requested', 'removing'].includes(holding.status)) {
     throw errorWithStatus(`Holding is ${holding.status} and cannot be added.`, 409);
   }
@@ -827,9 +844,9 @@ async function addInitialCart(id, source = 'manual') {
   logLine(`ADD #${id} start trigger=${source} want=${requested} slot=${holding.local_date} ${holding.local_time} occ=${holding.timetable_id}`);
 
   // Single login per run: this token serves availability + all cart calls.
-  let token = await authenticate();
+  let token = await authenticate(probe);
   updateHolding(id, { auth_token: token, auth_obtained_at: nowIso() });
-  const availability = await fetchAvailability(holding.local_date, id, token);
+  const availability = await fetchAvailability(holding.local_date, id, token, probe);
   const slot = availability.timetables.find((item) => item.id === Number(holding.timetable_id));
   if (!slot) {
     const msg = 'The selected timetable is no longer available for this date.';
@@ -889,6 +906,7 @@ async function addInitialCart(id, source = 'manual') {
             path: '/cart/add',
             token,
             holdingId: id,
+            probe,
             body: {
               visit_id: VISIT_ID,
               cart_id: cartId,
@@ -903,7 +921,7 @@ async function addInitialCart(id, source = 'manual') {
         } catch (addError) {
           if (Number(addError?.status) === 401 && !reauthed) {
             reauthed = true;
-            token = await authenticate();
+            token = await authenticate(probe);
             updateHolding(id, { auth_token: token, auth_obtained_at: nowIso() });
             continue;
           }
@@ -931,7 +949,7 @@ async function addInitialCart(id, source = 'manual') {
       updateHolding(id, { remote_cart_id: cartId, expires_at: expiresAt, last_added_at: lastAddedAt, next_run_at: new Date(Date.now() + 30 * 60 * 1000 + 5000).toISOString() });
     }
 
-    const cartResponse = await showCart(cartId, token, id);
+    const cartResponse = await showCart(cartId, token, id, probe);
     const cart = extractCart(cartResponse);
     priceTotal = Number.isFinite(Number(cart.total)) ? Number(cart.total) : null;
     const itemIds = cartItemIds(cartResponse);
@@ -995,11 +1013,11 @@ async function removeHolding(id) {
     return getHolding(id);
   }
 
-  const token = await authenticate();
+  const token = await authenticate(true);
   updateHolding(id, { auth_token: token, auth_obtained_at: nowIso() });
   let cartResponse = null;
   try {
-    cartResponse = await showCart(holding.remote_cart_id, token, id);
+    cartResponse = await showCart(holding.remote_cart_id, token, id, true);
   } catch (error) {
     if (error.status === 404) {
       db.prepare('UPDATE cart_items SET status = \'removed\' WHERE holding_id = ?').run(id);
@@ -1025,6 +1043,7 @@ async function removeHolding(id) {
         path: '/cart/removeitem',
         token,
         holdingId: id,
+        probe: true,
         body: { cart_id: holding.remote_cart_id, item_id: itemId },
       });
     }
@@ -1042,11 +1061,11 @@ async function removeHolding(id) {
 async function refreshCartState(id) {
   const holding = getHolding(id);
   if (!holding.remote_cart_id) throw errorWithStatus('Holding has no cart yet.', 409);
-  const token = await authenticate();
+  const token = await authenticate(true);
   updateHolding(id, { auth_token: token, auth_obtained_at: nowIso() });
   let cartResponse;
   try {
-    cartResponse = await showCart(holding.remote_cart_id, token, id);
+    cartResponse = await showCart(holding.remote_cart_id, token, id, true);
   } catch (error) {
     if (error.status === 404) {
       updateHolding(id, { last_error: 'Cart gone upstream (expired or deleted).', cart_verified_at: nowIso() });
@@ -1163,10 +1182,11 @@ async function handleApi(req, res, url) {
   }
   if (req.method === 'POST' && url.pathname === '/api/availability') {
     const body = await readJsonBody(req);
-    return sendJson(res, 200, await fetchAvailability(String(body.date || '')));
+    // Manual availability check — a live probe of the provider, never blocked
+    // by the breaker and never allowed to escalate it.
+    return sendJson(res, 200, await fetchAvailability(String(body.date || ''), null, null, true));
   }
   if (req.method === 'POST' && url.pathname === '/api/holdings') {
-    assertProviderReady('creating a holding');
     const body = await readJsonBody(req);
     const holding = await createHolding(body);
     logLine(`CREATE #${holding.id}: ${body.date} ${body.time} occ=${body.timetableId} qty=${body.quantity} auto=${Boolean(body.autoEnabled)}`);
@@ -1249,12 +1269,10 @@ async function handleApi(req, res, url) {
     const id = parseId(segments[2]);
     if (req.method === 'GET' && segments.length === 3) return sendJson(res, 200, { holding: getHolding(id) });
     if (req.method === 'GET' && segments[3] === 'cart') {
-      assertProviderReady('refreshing the cart');
       const result = await refreshCartState(id);
       return sendJson(res, 200, result);
     }
     if (req.method === 'POST' && segments[3] === 'add') {
-      assertProviderReady('adding to cart');
       return sendJson(res, 200, { holding: await addInitialCart(id, 'manual') });
     }
     if (req.method === 'POST' && segments[3] === 'enable-auto') {
