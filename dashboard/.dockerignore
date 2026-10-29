@@ -1,0 +1,13 @@
+# The database is data, not build context — it is 400+ MB and must never be
+# baked into an image. Same for logs, backups and local .env files.
+dashboard.sqlite
+dashboard.sqlite-*
+*.sqlite
+*.sqlite-*
+logs/
+backups/
+.env
+.env.*
+*.md
+*.bat
+start-dashboard.bat
