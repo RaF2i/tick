@@ -271,6 +271,9 @@ const toInt = (value, fallback = 0) => {
   const parsed = Number(value);
   return Number.isInteger(parsed) ? parsed : fallback;
 };
+// A deploy restarts the process. Without this the breaker would forget an
+// active provider block and probe again on the first tick after every restart.
+loadProviderState();
 
 // ---------------------------------------------------------------------------
 // Auto-stop (was "day-before cutoff"). Everything is authored in SPAIN time
@@ -453,6 +456,7 @@ function noteProviderPressure(kind) {
     : Math.min(PROVIDER_BASE_COOLDOWN_SEC * 2 ** Math.min(providerStrikes - 1, 5), PROVIDER_MAX_COOLDOWN_SEC);
   const until = Date.now() + sec * 1000;
   if (until > providerCooldownUntil) providerCooldownUntil = until;
+  saveProviderState();
   logLine(`PROVIDER ${kind === 'ip_block' ? 'IP BLOCK' : 'RATE LIMIT'}: all automation paused ${sec}s (strike ${providerStrikes})`);
 }
 // One success does not cancel a cooldown — otherwise auth succeeding and the
@@ -464,7 +468,40 @@ function noteProviderOk() {
     logLine(`PROVIDER ok: no pressure for ${Math.round(quietFor / 60000)}m, strikes reset`);
     providerStrikes = 0;
     providerCooldownUntil = 0;
+    saveProviderState();
   }
+}
+function loadProviderState() {
+  try {
+    const rows = db.prepare(`SELECT key, value FROM scheduler_state
+      WHERE key IN ('provider_cooldown_until','provider_strikes','provider_last_pressure')`).all();
+    for (const r of rows) {
+      if (r.key === 'provider_cooldown_until') providerCooldownUntil = Date.parse(r.value) || 0;
+      else if (r.key === 'provider_strikes') providerStrikes = Number(r.value) || 0;
+      else if (r.key === 'provider_last_pressure') lastProviderPressureAt = Date.parse(r.value) || 0;
+    }
+    if (providerCooling()) logLine(`PROVIDER: restored cooldown, ${providerCooldownLeft()}s left (strike ${providerStrikes})`);
+  } catch { /* ignore */ }
+}
+function saveProviderState() {
+  try {
+    const up = db.prepare(`INSERT INTO scheduler_state (key, value, updated_at) VALUES (?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`);
+    const now = nowIso();
+    up.run('provider_cooldown_until', new Date(providerCooldownUntil).toISOString(), now);
+    up.run('provider_strikes', String(providerStrikes), now);
+    up.run('provider_last_pressure', new Date(lastProviderPressureAt || 0).toISOString(), now);
+  } catch { /* ignore */ }
+}
+// Manual actions hit the same provider, so they must not be allowed to deepen
+// an active block. Fail fast with a message the UI can show in a toast.
+function assertProviderReady(action) {
+  if (!providerCooling()) return;
+  const mins = Math.max(1, Math.ceil(providerCooldownLeft() / 60));
+  throw errorWithStatus(
+    `Provider cooldown active — ${action} needs the provider, which is currently blocking this server. Try again in about ${mins} min.`,
+    429
+  );
 }
 // Space every outbound call at least MIN_CALL_GAP_MS apart.
 async function providerSlot() {
@@ -1073,6 +1110,9 @@ function getSchedulerStatus() {
     runningCount: runningJobs.size,
     lastTickAt: lastTickAt,
     lastTickResult: lastTickResult,
+    cooldownSec: providerCooldownLeft(),
+    cooldownUntil: providerCooldownUntil ? new Date(providerCooldownUntil).toISOString() : null,
+    providerStrikes,
   };
 }
 
@@ -1126,6 +1166,7 @@ async function handleApi(req, res, url) {
     return sendJson(res, 200, await fetchAvailability(String(body.date || '')));
   }
   if (req.method === 'POST' && url.pathname === '/api/holdings') {
+    assertProviderReady('creating a holding');
     const body = await readJsonBody(req);
     const holding = await createHolding(body);
     logLine(`CREATE #${holding.id}: ${body.date} ${body.time} occ=${body.timetableId} qty=${body.quantity} auto=${Boolean(body.autoEnabled)}`);
@@ -1208,10 +1249,14 @@ async function handleApi(req, res, url) {
     const id = parseId(segments[2]);
     if (req.method === 'GET' && segments.length === 3) return sendJson(res, 200, { holding: getHolding(id) });
     if (req.method === 'GET' && segments[3] === 'cart') {
+      assertProviderReady('refreshing the cart');
       const result = await refreshCartState(id);
       return sendJson(res, 200, result);
     }
-    if (req.method === 'POST' && segments[3] === 'add') return sendJson(res, 200, { holding: await addInitialCart(id, 'manual') });
+    if (req.method === 'POST' && segments[3] === 'add') {
+      assertProviderReady('adding to cart');
+      return sendJson(res, 200, { holding: await addInitialCart(id, 'manual') });
+    }
     if (req.method === 'POST' && segments[3] === 'enable-auto') {
       const h = getHolding(id);
       if (h.status === 'removed') throw errorWithStatus('Removed holdings cannot be re-enabled.', 409);
