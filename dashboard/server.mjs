@@ -54,14 +54,29 @@ const RETRY_API_SEC = Number(process.env.RETRY_API_SEC || 30);
 // expired (provider releases lazily), retry cart/add every few seconds instead
 // of waiting for the next scheduler tick. Only this error class loops —
 // genuine sellouts and API errors keep the normal backoff above.
-const RACE_RETRY_EVERY_SEC = Math.max(1, Number(process.env.RACE_RETRY_EVERY_SEC || 3));
-const RACE_WINDOW_SEC = Math.max(30, Number(process.env.RACE_WINDOW_SEC || 360));
+const RACE_RETRY_EVERY_SEC = Math.max(1, Number(process.env.RACE_RETRY_EVERY_SEC || 8));
+const RACE_WINDOW_SEC = Math.max(30, Number(process.env.RACE_WINDOW_SEC || 180));
 // Only loop when the previous cart expired recently — otherwise a 403 means
 // truly sold out and hammering would be pointless.
 const RACE_AFTER_EXPIRY_SEC = Math.max(60, Number(process.env.RACE_AFTER_EXPIRY_SEC || 600));
 // Retention for audit tables (runs capped per holding instead of by age).
 const LOG_RETENTION_DAYS = Math.max(1, Number(process.env.LOG_RETENTION_DAYS || 7));
 const RUNS_PER_HOLDING = Math.max(50, Number(process.env.RUNS_PER_HOLDING || 500));
+// Global provider protection. The provider throttles and WAF-blocks per IP, so a
+// per-holding backoff is not enough: one hammering holding blocks every other
+// one, and each retry while blocked extends the block. These are the shared
+// brakes — a cooldown stops the whole scheduler, not just the failing holding.
+const RETRY_MAX_SEC = Math.max(60, Number(process.env.RETRY_MAX_SEC || 3600));
+const PROVIDER_BASE_COOLDOWN_SEC = Math.max(10, Number(process.env.PROVIDER_BASE_COOLDOWN_SEC || 60));
+const PROVIDER_MAX_COOLDOWN_SEC = Math.max(60, Number(process.env.PROVIDER_MAX_COOLDOWN_SEC || 1800));
+const IP_BLOCK_COOLDOWN_SEC = Math.max(60, Number(process.env.IP_BLOCK_COOLDOWN_SEC || 3600));
+// Minimum gap between any two provider calls, so a burst of holdings cannot
+// leave as a spike.
+const MIN_CALL_GAP_MS = Math.max(0, Number(process.env.MIN_CALL_GAP_MS || 500));
+let providerCooldownUntil = 0;
+let providerStrikes = 0;
+let lastProviderPressureAt = 0;
+let nextProviderCallAt = 0;
 const DEFAULT_REPEAT_MINUTES = Number(process.env.REPEAT_MINUTES || 30);
 const DEFAULT_REPEAT_OFFSET_SEC = Number(process.env.REPEAT_OFFSET_SEC || 5);
 const DB_PATH = process.env.DASHBOARD_DB || join(ROOT, 'dashboard.sqlite');
@@ -236,6 +251,9 @@ ensureColumn('holdings', 'auth_token', 'auth_token TEXT');
 ensureColumn('holdings', 'auth_obtained_at', 'auth_obtained_at TEXT');
 ensureColumn('holdings', 'cart_verified_at', 'cart_verified_at TEXT');
 ensureColumn('holdings', 'auto_stop_at', 'auto_stop_at TEXT');
+// Consecutive failed runs. Drives exponential backoff so a failing holding
+// stops retrying every 30s forever.
+ensureColumn('holdings', 'fail_streak', 'fail_streak INTEGER NOT NULL DEFAULT 0');
 
 // One-time normalization: slot times stored as HH:MM gain :00 seconds.
 db.prepare(`UPDATE holdings SET local_time = local_time || ':00' WHERE local_time LIKE '__:__'`).run();
@@ -381,7 +399,9 @@ function chunksFor(quantity, max = 30) {
   return chunks;
 }
 
-function safeJson(value, maxLength = 12000) {
+// Audit rows are capped hard: api_events was holding 150 MB because full
+// availability payloads (all timetables) were stored per call.
+function safeJson(value, maxLength = 2000) {
   try {
     const text = JSON.stringify(value ?? null);
     return text.length > maxLength ? `${text.slice(0, maxLength)}…` : text;
@@ -417,6 +437,43 @@ function errorWithStatus(message, status = 400, details = null) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// Scheduler-wide circuit breaker. 429 = slow down; IP_BLOCKED = stop entirely
+// for much longer, because every request during a WAF block risks extending it.
+function providerCooling() {
+  return Date.now() < providerCooldownUntil;
+}
+function providerCooldownLeft() {
+  return Math.max(0, Math.ceil((providerCooldownUntil - Date.now()) / 1000));
+}
+function noteProviderPressure(kind) {
+  providerStrikes += 1;
+  lastProviderPressureAt = Date.now();
+  const sec = kind === 'ip_block'
+    ? Math.min(IP_BLOCK_COOLDOWN_SEC * 2 ** Math.min(providerStrikes - 1, 3), 6 * 3600)
+    : Math.min(PROVIDER_BASE_COOLDOWN_SEC * 2 ** Math.min(providerStrikes - 1, 5), PROVIDER_MAX_COOLDOWN_SEC);
+  const until = Date.now() + sec * 1000;
+  if (until > providerCooldownUntil) providerCooldownUntil = until;
+  logLine(`PROVIDER ${kind === 'ip_block' ? 'IP BLOCK' : 'RATE LIMIT'}: all automation paused ${sec}s (strike ${providerStrikes})`);
+}
+// One success does not cancel a cooldown — otherwise auth succeeding and the
+// next call being throttled would reset the streak on every tick. Strikes only
+// decay after 5 quiet minutes.
+function noteProviderOk() {
+  const quietFor = Date.now() - lastProviderPressureAt;
+  if (providerStrikes > 0 && quietFor > 5 * 60 * 1000) {
+    logLine(`PROVIDER ok: no pressure for ${Math.round(quietFor / 60000)}m, strikes reset`);
+    providerStrikes = 0;
+    providerCooldownUntil = 0;
+  }
+}
+// Space every outbound call at least MIN_CALL_GAP_MS apart.
+async function providerSlot() {
+  const now = Date.now();
+  const at = Math.max(now, nextProviderCallAt);
+  nextProviderCallAt = at + MIN_CALL_GAP_MS;
+  if (at > now) await sleep(at - now);
+}
+
 // True when a cart/add failure looks like our own just-expired cart still
 // locking capacity (provider releases lazily after expires_at), as opposed
 // to a genuine sellout. Only this case may enter the tight retry loop.
@@ -444,6 +501,8 @@ async function apiRequest({ method, path, token = null, body = undefined, holdin
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   if (token) headers.Authorization = `Bearer ${token}`;
 
+  await providerSlot();
+
   let response;
   try {
     response = await fetch(endpoint, {
@@ -458,6 +517,15 @@ async function apiRequest({ method, path, token = null, body = undefined, holdin
   }
 
   const payload = await readResponse(response);
+  // Classify pressure before anything else so the next holding in this tick
+  // already sees the cooldown.
+  if (response.status === 429) {
+    noteProviderPressure('rate_limit');
+  } else if (response.status === 403 && /IP_BLOCKED|razones de seguridad/i.test(JSON.stringify(payload || ''))) {
+    noteProviderPressure('ip_block');
+  } else if (response.ok) {
+    noteProviderOk();
+  }
   recordEvent({
     holdingId,
     endpoint: path,
@@ -1242,11 +1310,15 @@ const runningJobs = new Set();
 let lastTickAt = null;
 let lastTickResult = 'never ran';
 
-function retryDelayFor(status, message) {
+function retryDelayFor(status, message, streak = 1) {
   const msg = `${status} ${message || ''}`;
-  if (/NO_CAPACITY|FULLY|already_booked|closed|time_not_found|date_not_found|HTTP 40[39]/i.test(msg)) return RETRY_BOOKED_SEC;
-  if (/429|5\d\d|api_error|network|fetch|502|503/i.test(msg)) return RETRY_API_SEC;
-  return RETRY_FAILED_SEC;
+  let base = RETRY_FAILED_SEC;
+  if (/NO_CAPACITY|FULLY|already_booked|closed|time_not_found|date_not_found|HTTP 40[39]/i.test(msg)) base = RETRY_BOOKED_SEC;
+  else if (/429|5\d\d|api_error|network|fetch|502|503/i.test(msg)) base = RETRY_API_SEC;
+  // 1x, 2x, 4x, 8x, 16x, 32x — capped. A 429 that keeps repeating must not
+  // keep reconnecting every 30 seconds.
+  const steps = Math.min(Math.max(Number(streak) || 1, 1) - 1, 5);
+  return Math.min(base * 2 ** steps, Math.max(base, RETRY_MAX_SEC));
 }
 
 // Daily retention sweep for audit tables (at most once per 24h, tracked in
@@ -1273,7 +1345,8 @@ function maybePrune() {
   }
 }
 
-async function schedulerTick() {
+let tickRunning = false;
+async function runSchedulerTick() {
   lastTickAt = nowIso();
   maybePrune();
   // Auto-stop sweep — runs even when automation is paused so the Auto-stopped
@@ -1293,6 +1366,10 @@ async function schedulerTick() {
     lastTickResult = 'automation disabled - skipping';
     return;
   }
+  if (providerCooling()) {
+    lastTickResult = `provider cooldown ${providerCooldownLeft()}s left - skipping tick`;
+    return;
+  }
   let due = [];
   try {
     due = db.prepare(`
@@ -1306,13 +1383,16 @@ async function schedulerTick() {
     return;
   }
   if (!due.length) {
-    // also re-queue expired carts slightly before expiry
+    // Also re-queue expired carts slightly before expiry — but only if their
+    // own backoff has elapsed. Without this filter this branch silently
+    // overrode the 600s retry and re-ran the same holdings every tick.
     try {
       const expiring = db.prepare(`
         SELECT * FROM holdings WHERE auto_enabled = 1 AND status = 'manual_hold'
         AND expires_at IS NOT NULL AND datetime(expires_at) <= datetime('now', ?)
+        AND (fail_streak = 0 OR next_run_at IS NULL OR next_run_at <= ?)
         LIMIT 5
-      `).all(`+${REBUY_LEAD_SEC} seconds`);
+      `).all(`+${REBUY_LEAD_SEC} seconds`, nowIso());
       due = expiring;
     } catch { /* ignore */ }
   }
@@ -1321,6 +1401,11 @@ async function schedulerTick() {
     return;
   }
   for (const h of due) {
+    // Another holding just tripped the breaker — stop this tick too.
+    if (providerCooling()) {
+      lastTickResult = `provider cooldown ${providerCooldownLeft()}s left - stopped mid-tick`;
+      break;
+    }
     if (runningJobs.has(h.id)) continue;
     runningJobs.add(h.id);
     try {
@@ -1330,20 +1415,41 @@ async function schedulerTick() {
       db.prepare('UPDATE holdings SET status=?, run_count=run_count+1, updated_at=? WHERE id=?').run('running', nowIso(), h.id);
       const result = await addInitialCart(h.id, 'auto');
       const nextRun = new Date(Date.now() + repeatMin * 60 * 1000 + offsetSec * 1000).toISOString();
-      updateHolding(h.id, { next_run_at: nextRun });
+      updateHolding(h.id, { next_run_at: nextRun, fail_streak: 0 });
       lastTickResult = `holding #${h.id} ok -> next ${nextRun}`;
       logLine(`TICK holding #${h.id} ok -> next ${nextRun}`);
       recordEvent({ holdingId: h.id, endpoint: '/scheduler/tick', method: 'TICK', statusCode: 200, request: { repeatMin }, response: { cart: result.remote_cart_id, nextRun } });
     } catch (e) {
       const status = e.status === 409 ? 'booked' : 'failed';
-      const delaySec = retryDelayFor(status, e.message);
+      const cur = getHolding(h.id);
+      const streak = Number(cur.fail_streak || 0) + 1;
+      const delaySec = retryDelayFor(status, e.message, streak);
       const nextRun = new Date(Date.now() + delaySec * 1000).toISOString();
-      try { updateHolding(h.id, { next_run_at: nextRun, last_error: e.message }); } catch { /* ignore */ }
-      lastTickResult = `holding #${h.id} ${status}: ${e.message} -> retry ${delaySec}s`;
-      logLine(`TICK holding #${h.id} ${status}: ${e.message} -> retry ${delaySec}s`);
+      const patch = { next_run_at: nextRun, last_error: e.message, fail_streak: streak };
+      // A failure before cart/add (auth, availability) throws before
+      // addInitialCart's own catch, leaving the row stuck in 'running' forever.
+      if (cur.status === 'running') patch.status = cur.remote_cart_id ? 'manual_hold' : 'failed';
+      try { updateHolding(h.id, patch); } catch { /* ignore */ }
+      lastTickResult = `holding #${h.id} ${status}: ${e.message} -> retry ${delaySec}s (streak ${streak})`;
+      logLine(`TICK holding #${h.id} ${status}: ${e.message} -> retry ${delaySec}s (streak ${streak})`);
     } finally {
       runningJobs.delete(h.id);
     }
+  }
+}
+
+// Interval ticks must never overlap: a release-race run can take minutes, and
+// overlapping ticks let several holdings call the provider at once.
+async function schedulerTick() {
+  if (tickRunning) {
+    lastTickResult = 'previous tick still running - skipped';
+    return;
+  }
+  tickRunning = true;
+  try {
+    await runSchedulerTick();
+  } finally {
+    tickRunning = false;
   }
 }
 
