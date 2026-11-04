@@ -895,6 +895,14 @@ async function egressHealth() {
 }
 
 function loadEgressState() {
+  // An explicitly-set EGRESS_MODE env wins (predictable for deployments);
+  // otherwise the persisted mode (last UI switch) is restored.
+  if (process.env.EGRESS_MODE && EGRESS_MODES.includes(String(process.env.EGRESS_MODE).toLowerCase())) {
+    if (EGRESS_MODE !== String(process.env.EGRESS_MODE).toLowerCase()) {
+      logLine(`EGRESS: env EGRESS_MODE=${EGRESS_MODE} overrides persisted mode`);
+    }
+    return;
+  }
   try {
     const row = db.prepare(`SELECT value FROM scheduler_state WHERE key = 'egress_mode'`).get();
     if (row?.value && EGRESS_MODES.includes(row.value)) {

@@ -16,6 +16,9 @@
 //
 // Env:
 //   ROTATE_HELPER_PORT  listen port (default 3101)
+//   ROTATE_HELPER_HOST  bind address (default 127.0.0.1; use 172.17.0.1 for
+//                       Docker containers to reach it — a non-loopback bind
+//                       REQUIRES ROTATE_TOKEN)
 //   ROTATE_TOKEN        optional shared secret
 //   WARP_PROXY_PORT     WARP SOCKS port (default 40000)
 //   WARP_HTTP_PORT      privoxy HTTP bridge port (default 8118)
@@ -26,6 +29,7 @@ import { promisify } from 'node:util';
 
 const execFileP = promisify(execFile);
 const PORT = Number(process.env.ROTATE_HELPER_PORT || 3101);
+const HOST = (process.env.ROTATE_HELPER_HOST || '127.0.0.1').trim();
 const TOKEN = (process.env.ROTATE_TOKEN || '').trim();
 const WARP_PROXY_PORT = Number(process.env.WARP_PROXY_PORT || 40000);
 const WARP_HTTP_PORT = Number(process.env.WARP_HTTP_PORT || 8118);
@@ -113,6 +117,11 @@ async function rotate() {
   }
 }
 
+if (HOST !== '127.0.0.1' && HOST !== 'localhost' && !TOKEN) {
+  log(`REFUSING to bind ${HOST} without ROTATE_TOKEN — the rotate endpoint would be open to the network. Set ROTATE_TOKEN or keep 127.0.0.1.`);
+  process.exit(1);
+}
+
 createServer(async (req, res) => {
   if (req.method === 'POST' && req.url === '/rotate') {
     if (TOKEN) {
@@ -133,6 +142,6 @@ createServer(async (req, res) => {
   }
   res.writeHead(404, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ ok: false, error: 'POST /rotate or GET /health' }));
-}).listen(PORT, '127.0.0.1', () => {
-  log(`warp-rotate-helper listening on 127.0.0.1:${PORT} (token: ${TOKEN ? 'on' : 'off'}, bridge: 127.0.0.1:${WARP_HTTP_PORT})`);
+}).listen(PORT, HOST, () => {
+  log(`warp-rotate-helper listening on ${HOST}:${PORT} (token: ${TOKEN ? 'on' : 'off'}, bridge: 127.0.0.1:${WARP_HTTP_PORT})`);
 });
