@@ -631,6 +631,19 @@ td strong { letter-spacing: 0; font-weight: 500; }
 .login-card h1 { margin: 0; font-size: 20px; font-weight: 300; letter-spacing: -.02em; }
 .login-card label { text-align: left; }
 .login-card .button { width: 100%; }
+/* Password field with the reveal (eye) button */
+.pass-field { position: relative; display: block; }
+.pass-field input { padding-right: 52px; }
+.pass-eye {
+  position: absolute; top: 50%; right: 6px; transform: translateY(-50%);
+  width: 40px; height: 40px; display: grid; place-items: center; padding: 0;
+  border: 0; border-radius: 8px; background: transparent;
+  color: var(--muted); cursor: pointer;
+  transition: color .15s, background .15s;
+}
+.pass-eye:hover { color: var(--ink); background: rgba(255,255,255,.06); }
+.pass-eye:focus-visible { outline: none; color: var(--ink); box-shadow: 0 0 0 2px rgba(200,245,66,.45); }
+.pass-eye .ic { width: 18px; height: 18px; }
 
 /* ---------- Toasts ---------- */
 /* Top-centre stack. pointer-events off on the container so the page stays
