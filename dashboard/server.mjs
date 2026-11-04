@@ -864,7 +864,14 @@ async function egressFetch(url, options = {}) {
     return fetch(url, options);
   }
   const mod = await getUndici();
-  if (!mod?.ProxyAgent) return fetch(url, options);
+  // FAIL CLOSED. A proxy mode that silently falls back to a direct connection
+  // would send the provider the VPS's real IP — exactly the leak this feature
+  // exists to prevent. Refuse the call instead; the caller records it as a
+  // network error and the breaker/scheduler handles it like any outage.
+  if (!mod?.ProxyAgent) {
+    logLine(`EGRESS BLOCKED: mode=${key} but undici ProxyAgent is unavailable — refusing to connect directly (real IP would leak)`);
+    throw new Error(`egress ${key} is configured but the proxy agent is unavailable; refusing a direct connection`);
+  }
   const keyToday = `${key}|${proxy}`;
   if (keyToday !== egressDispatcherKey) {
     egressDispatcher = new mod.ProxyAgent(proxy);
