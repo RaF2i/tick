@@ -152,6 +152,103 @@ Test-NetConnection SERVER_IP -Port 22
 
 ---
 
+## Egress — WARP / Tor
+
+When the provider WAF blocks the VPS IP (`403 IP_BLOCKED — Su solicitud ha sido rechazada`), route provider calls through a local proxy instead. Three modes:
+
+| Mode | Proxy | Install |
+|---|---|---|
+| `direct` | — | none (default) |
+| `warp` | `127.0.0.1:40000` | `cloudflare-warp` |
+| `tor` | `127.0.0.1:8118` (Privoxy → Tor 9050) | `tor privoxy` |
+
+**WARP setup (Ubuntu 24.04):**
+
+```bash
+# 1. Cloudflare repo + install (see https://one.one.one/install/ for current URLs)
+curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+echo "deb [arch=amd64 signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/cloudflare-main any main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
+sudo apt-get update && sudo apt-get install -y cloudflare-warp
+
+# 2. PROXY mode on port 40000 (never "mode warp" on a VPS — full tunnel
+#    hijacks SSH and nothing listens on 40000 in that mode)
+warp-cli --accept-tos mode proxy
+warp-cli --accept-tos proxy port 40000
+warp-cli --accept-tos registration new
+warp-cli --accept-tos connect
+warp-cli --accept-tos status   # should say Connected
+
+# 3. privoxy bridges SOCKS5 40000 -> HTTP 8118 (Node speaks HTTP proxies)
+sudo apt-get install -y privoxy
+echo 'forward-socks5 / 127.0.0.1:40000 .' | sudo tee -a /etc/privoxy/config
+sudo systemctl enable --now privoxy
+
+# 4. verify: trace through the bridge must say warp=on
+curl -s -x http://127.0.0.1:8118 https://www.cloudflare.com/cdn-cgi/trace | grep -E '^(ip|warp)='
+```
+
+**Docker deployments** — the container has no `warp-cli`, so rotation is delegated
+to a helper on the host:
+
+```bash
+# one-shot manual test:
+ROTATE_TOKEN=optional-secret node dashboard/tools/warp-rotate-helper.mjs
+curl -X POST -H "Authorization: Bearer optional-secret" http://127.0.0.1:3101/rotate
+
+# under systemd (tick-rotate.service): ExecStart=/usr/bin/node /root/tick-docker/tools/warp-rotate-helper.mjs
+# container env:
+#   EGRESS_ROTATE_COMMAND=node /app/tools/host-rotate-client.mjs
+#   ROTATE_HELPER_URL=http://172.17.0.1:3101/rotate   (docker bridge -> host)
+#   ROTATE_TOKEN=optional-secret
+```
+
+**Tor setup:**
+
+```bash
+sudo apt-get install -y tor privoxy
+# privoxy: forward 8118 -> tor socks 9050
+echo 'forward-socks5 / 127.0.0.1:9050 .' | sudo tee -a /etc/privoxy/config
+sudo systemctl enable --now tor privoxy
+```
+
+**Enable in the dashboard:**
+
+```ini
+# dashboard/.env
+EGRESS_MODE=warp        # or tor, or direct
+EGRESS_PROXY_URL=        # leave empty for the mode default above
+EGRESS_HEALTH_INTERVAL_SEC=60
+```
+
+Or flip it live from the UI: **Controller settings → Egress**. The mode persists in `scheduler_state` across restarts, and switching clears the provider cooldown (new IP = clean slate). Health is logged every `EGRESS_HEALTH_INTERVAL_SEC` while warp/tor is active.
+
+**Auto-rotation on IP_BLOCKED:** when a `403 IP_BLOCKED` comes back in warp/tor mode, the dashboard rotates and retries the same call on the fresh route — no 6h park. A rotation only counts when the new route **verifies** (trace through the proxy says `warp=on`/`plus`, exit IP differs from the last accepted one). Tor via `systemctl restart tor privoxy` (falls back to pkill/start, polls the proxy up to 60s). Tunables:
+
+```ini
+ROTATE_TRIES_MAX=4             # rotations per IP_BLOCKED (min 1)
+ROTATE_COOLDOWN_SEC=8          # space between rotations (Cloudflare throttles bursts)
+ROTATE_COMMAND_TIMEOUT_MS=30000
+ROTATE_INTERVAL_SEC=7200       # fresh exit IP every 2h (0 = off)
+EGRESS_VERIFY_WAIT_SEC=45      # seconds a rotation gets to prove the new route
+ROTATE_RETRY_AFTER_BLOCK_SEC=90  # re-run a holding failed by IP_BLOCKED-after-rotation
+EGRESS_SHORT_BLOCK_COOLDOWN_SEC=180  # breaker cap when a FRESH IP gets blocked
+EGRESS_ROTATE_COMMAND=         # host helper command when the dashboard runs in Docker
+```
+
+On startup in proxy modes the dashboard **bootstraps**: it overrides any restored breaker, verifies the route and rotates until a fresh verified exit IP is live — so an already-blocked VPS IP starts working immediately. Scheduled rotation (every `ROTATE_INTERVAL_SEC`) resets on any manual/block rotation. The footer shows the current exit IP and the total verified IP changes (`egress_ip_changes` in `scheduler_state`).
+
+**Verify on the VPS:**
+
+```bash
+curl -s -x http://127.0.0.1:40000 https://example.com -o /dev/null -w '%{http_code}\n'   # WARP
+curl -s -x http://127.0.0.1:8118 https://example.com -o /dev/null -w '%{http_code}\n'    # Tor
+journalctl -u tick-dashboard -f | grep EGRESS
+```
+
+> WARP and Tor are **mutually exclusive on one box** — pick one `EGRESS_MODE` per VPS. WARP needs systemd (`warp-svc`); Tor exit IPs are slower and more heavily flagged by the provider, but still rotate when the WAF trips. After installing `undici`, run `cd /var/www/tick/dashboard && npm install` once.
+
+---
+
 ## Updates
 
 ```bash

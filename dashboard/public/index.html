@@ -105,7 +105,20 @@
         <div class="table-wrap" tabindex="0" role="region" aria-label="API activity events"><table id="eventsTable"><thead><tr><th>Time</th><th>Endpoint</th><th>Code</th><th>Holding</th></tr></thead><tbody></tbody></table></div>
       </details>
 
-      <details class="panel details"><summary>Controller settings</summary><pre id="configPre" class="config-pre" tabindex="0" role="region" aria-label="Controller configuration JSON — scroll to see all settings">Loading…</pre></details>
+      <details class="panel details"><summary>Controller settings</summary><pre id="configPre" class="config-pre" tabindex="0" role="region" aria-label="Controller configuration JSON — scroll to see all settings">Loading…</pre>
+        <div class="egress-block">
+          <span class="stop-label">Egress — provider IP route</span>
+          <div class="stop-row">
+            <select id="egressMode" aria-label="Egress mode">
+              <option value="direct">Direct</option>
+              <option value="warp">Cloudflare WARP</option>
+              <option value="tor">Tor (Privoxy)</option>
+            </select>
+            <button id="egressApply" class="table-action" type="button">Apply</button>
+          </div>
+          <span class="field-hint" id="egressHint">Direct = VPS IP (gets IP_BLOCKED when the provider WAF trips). WARP/Tor route provider calls through a local proxy on this machine.</span>
+        </div>
+      </details>
     </div>
 
     <section id="holdingPage" class="holding-page hidden" aria-live="polite">
@@ -123,7 +136,7 @@
       <div id="holdingBody" class="holding-grid"></div>
     </section>
 
-    <footer class="page-footer"><span>Manual + auto controller</span><span class="mono">v0.6 </span></footer>
+    <footer class="page-footer"><span>Manual + auto controller</span><span class="mono" id="egressFooter">egress: loading…</span><span class="mono">v0.6 </span></footer>
   </main>
 </div>
 

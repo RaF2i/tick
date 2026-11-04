@@ -2,6 +2,9 @@ import { createServer } from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+const execFileP = promisify(execFile);
 import { dirname, extname, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { existsSync, readFileSync } from 'node:fs';
@@ -45,6 +48,36 @@ const API_KEY = process.env.SERVITICKETS_API_KEY || '';
 const ALLOW_CART_APPEND = process.env.ALLOW_CART_APPEND !== 'false';
 // ON unless explicitly disabled — `npm start` must behave like start-dashboard.bat.
 let AUTOMATION_ENABLED = process.env.AUTOMATION_ENABLED !== 'false';
+const EGRESS_MODES = ['direct', 'warp', 'tor'];
+let EGRESS_MODE = String(process.env.EGRESS_MODE || 'direct').toLowerCase();
+if (!EGRESS_MODES.includes(EGRESS_MODE)) {
+  logLine(`WARN: unknown EGRESS_MODE '${EGRESS_MODE}' — falling back to direct`);
+  EGRESS_MODE = 'direct';
+}
+const EGRESS_PROXY_URL = (process.env.EGRESS_PROXY_URL || '').trim();
+const EGRESS_TEST_URL = (process.env.EGRESS_TEST_URL || 'https://example.com').trim();
+const WARP_PROXY_PORT = Number(process.env.WARP_PROXY_PORT || 40000);
+const TOR_SOCKS_PORT = Number(process.env.TOR_SOCKS_PORT || 9050);
+const TOR_HTTP_PORT = Number(process.env.TOR_HTTP_PORT || 8118);
+const EGRESS_HEALTH_INTERVAL_SEC = Math.max(15, Number(process.env.EGRESS_HEALTH_INTERVAL_SEC || 60));
+// IP rotation (see the egress block below). Defaults mirror opencode-infinite.
+const ROTATE_TRIES_MAX = Math.max(1, Number(process.env.ROTATE_TRIES_MAX || 4));
+const ROTATE_COOLDOWN_SEC = Math.max(1, Number(process.env.ROTATE_COOLDOWN_SEC || 8));
+const ROTATE_COMMAND_TIMEOUT_MS = Math.max(5000, Number(process.env.ROTATE_COMMAND_TIMEOUT_MS || 30000));
+// Fresh exit IP every 2h by default (0 disables scheduled rotation). An
+// IP_BLOCKED rotates immediately instead of waiting for this timer.
+const ROTATE_INTERVAL_SEC = Math.max(0, Number(process.env.ROTATE_INTERVAL_SEC || 7200));
+// Seconds a rotation gets to prove the new route is up before it counts as failed.
+const EGRESS_VERIFY_WAIT_SEC = Math.max(5, Number(process.env.EGRESS_VERIFY_WAIT_SEC || 45));
+// When an auto run fails with IP_BLOCKED and the IP was rotated, re-run the
+// failed holding this many seconds later instead of the long sellout backoff.
+const ROTATE_RETRY_AFTER_BLOCK_SEC = Math.max(15, Number(process.env.ROTATE_RETRY_AFTER_BLOCK_SEC || 90));
+// In proxy modes a block on a *fresh* IP is capped to this breaker length —
+// the next run rotates again rather than parking 1-6h.
+const EGRESS_SHORT_BLOCK_COOLDOWN_SEC = Math.max(30, Number(process.env.EGRESS_SHORT_BLOCK_COOLDOWN_SEC || 180));
+// When the dashboard runs in Docker and warp-cli/tor live on the host, set this
+// to a shell command that performs the rotation (tools/warp-rotate-helper.mjs).
+const EGRESS_ROTATE_COMMAND = (process.env.EGRESS_ROTATE_COMMAND || '').trim();
 const TICK_INTERVAL_MS = Math.max(5000, Number(process.env.TICK_INTERVAL_MS || 15000));
 const REBUY_LEAD_SEC = Number(process.env.REBUY_LEAD_SEC || 10);
 const RETRY_FAILED_SEC = Number(process.env.RETRY_FAILED_SEC || 120);
@@ -451,7 +484,7 @@ function providerCooling() {
 function providerCooldownLeft() {
   return Math.max(0, Math.ceil((providerCooldownUntil - Date.now()) / 1000));
 }
-function noteProviderPressure(kind, { escalate = true } = {}) {
+function noteProviderPressure(kind, { escalate = true, capSec = 0 } = {}) {
   const label = kind === 'ip_block' ? 'IP BLOCK' : 'RATE LIMIT';
   // A manual probe is the user asking "is it still blocked?". Report the answer,
   // but never let a click extend the cooldown that protects the scheduler.
@@ -461,9 +494,12 @@ function noteProviderPressure(kind, { escalate = true } = {}) {
   }
   providerStrikes += 1;
   lastProviderPressureAt = Date.now();
-  const sec = kind === 'ip_block'
+  let sec = kind === 'ip_block'
     ? Math.min(IP_BLOCK_COOLDOWN_SEC * 2 ** Math.min(providerStrikes - 1, 3), 6 * 3600)
     : Math.min(PROVIDER_BASE_COOLDOWN_SEC * 2 ** Math.min(providerStrikes - 1, 5), PROVIDER_MAX_COOLDOWN_SEC);
+  // A block on a just-rotated exit is capped short: the next run rotates again
+  // instead of parking the whole scheduler for hours.
+  if (capSec) sec = Math.min(sec, capSec);
   const until = Date.now() + sec * 1000;
   if (until > providerCooldownUntil) providerCooldownUntil = until;
   saveProviderState();
@@ -546,6 +582,342 @@ async function readResponse(res) {
   }
 }
 
+function egressProxyUrl() {
+  if (EGRESS_PROXY_URL) return EGRESS_PROXY_URL;
+  if (EGRESS_MODE === 'warp') return `http://127.0.0.1:${WARP_PROXY_PORT}`;
+  if (EGRESS_MODE === 'tor') return `http://127.0.0.1:${TOR_HTTP_PORT}`;
+  return '';
+}
+
+// --- IP hunt on IP_BLOCKED -------------------------------------------------
+// Every 403 IP_BLOCKED used to park the scheduler for up to 6h on a poisoned IP.
+// Instead we now rotate the egress IP and retry the same call right away.
+// WARP: subprocess warp-cli registration delete/new (cloudflare-warp installed).
+// Tor: restart tor+privoxy via systemctl (or kill+start if not systemd).
+// (ROTATE_* constants are defined in the top config block; import lives there too.)
+
+// Guard: never run two hunts concurrently (scheduler tick is serialized,
+// but manual probes fire from the HTTP layer at the same time).
+let rotating = false;
+
+// Last time a rotation was performed (any trigger). Drives the 2h schedule.
+let lastRotateAt = 0;
+
+async function execTimeout(cmd, args, timeoutMs = ROTATE_COMMAND_TIMEOUT_MS) {
+  return execFileP(cmd, args, { timeout: timeoutMs, maxBuffer: 1024 * 1024, shell: false });
+}
+
+// Delegate rotation to the host when the dashboard runs in Docker (the
+// container has no warp-cli/tor). EGRESS_ROTATE_COMMAND is a shell command;
+// it must do the whole rotate + wait-for-route job and exit 0 on success.
+async function delegatedRotate() {
+  logLine(`EGRESS ROTATE delegated: ${EGRESS_ROTATE_COMMAND}`);
+  const { stdout } = await execFileP('/bin/sh', ['-c', EGRESS_ROTATE_COMMAND], { timeout: Math.max(ROTATE_COMMAND_TIMEOUT_MS, EGRESS_VERIFY_WAIT_SEC * 1000 + 20000), maxBuffer: 1024 * 1024 });
+  if (stdout.trim()) logLine(`EGRESS ROTATE delegated output: ${stdout.trim().slice(0, 300)}`);
+  return true;
+}
+
+// Isolation rule: WARP runs in proxy mode, so it only ever exposes a local
+// SOCKS5 port that this project uses. Nothing else on the box is routed
+// through it — no system-wide tunnel, no DNS change, no default route. SSH on
+// 22 and the dashboard port stay on the VPS's real IP at all times.
+async function warpRotate() {
+  logLine('EGRESS ROTATE warp: proxy mode, registration delete + new');
+  try {
+    await execTimeout('warp-cli', ['--accept-tos', 'mode', 'proxy']);
+    await execTimeout('warp-cli', ['--accept-tos', 'proxy', 'port', String(WARP_PROXY_PORT)]);
+  } catch (e) {
+    logLine(`EGRESS ROTATE warp: mode/port setup failed (${e.message}) — continuing, daemon may already be configured`);
+  }
+  try {
+    await execTimeout('warp-cli', ['--accept-tos', 'registration', 'delete']);
+  } catch { /* already unregistered is fine */ }
+  // "registration delete returns before the daemon has finished tearing the
+  // old one down, and the next 'registration new' then fails" — the launcher
+  // waits out that teardown. Space the burst out the same way.
+  await sleep(3000);
+  // Cloudflare throttles rapid "registration new" bursts (429), so each
+  // attempt is retried with a pause rather than fired once and given up on.
+  let registered = false;
+  for (let i = 0; i < 3 && !registered; i++) {
+    try {
+      await execTimeout('warp-cli', ['--accept-tos', 'registration', 'new']);
+      registered = true;
+    } catch (e) {
+      logLine(`EGRESS ROTATE warp: registration new failed (${String(e.message).slice(0, 120)}), retry ${i + 1}/3`);
+      await sleep(5000);
+    }
+  }
+  if (!registered) return false;
+  try { await execTimeout('warp-cli', ['--accept-tos', 'connect']); } catch { /* may already be connecting */ }
+  // Poll status briefly; the authoritative check is routeUp (trace + warp=on).
+  for (let i = 0; i < 20; i++) {
+    try {
+      const { stdout } = await execTimeout('warp-cli', ['--accept-tos', 'status'], 8000);
+      if (/Connected/i.test(stdout)) return true;
+    } catch { /* keep polling */ }
+    await sleep(1000);
+  }
+  // Even if status polling misses, the proxy might be up — routeUp decides.
+  logLine('EGRESS ROTATE warp: status did not report Connected within 20s, route check will decide');
+  return true;
+}
+
+async function torRotate() {
+  logLine('EGRESS ROTATE tor: systemctl restart tor privoxy (fallback: kill+start)');
+  try {
+    await execTimeout('systemctl', ['restart', 'tor', 'privoxy'], 30000);
+  } catch {
+    logLine('EGRESS ROTATE tor: systemctl restart failed, falling back to pkill/start');
+    try { await execTimeout('pkill', ['-f', 'tor.*SocksPort|privoxy'], 5000); } catch { /* ignore */ }
+    await sleep(2000);
+    try { await execTimeout('systemctl', ['start', 'tor', 'privoxy'], 30000); } catch (e) {
+      logLine(`EGRESS ROTATE tor failed: cannot restart tor/privoxy (${e.message})`);
+      return false;
+    }
+  }
+  // Wait for Tor to bootstrap (poll the SOCKS port, up to ~60s).
+  for (let i = 0; i < 60; i++) {
+    const h = await egressHealth();
+    if (h.ok) return true;
+    await sleep(1000);
+  }
+  logLine('EGRESS ROTATE tor: proxy not answering after 60s');
+  return false;
+}
+
+// One rotation attempt = reconfigure + verify. Success requires the route to
+// come up with a proven tunnel AND a different exit IP (EGRESS_VERIFY_WAIT_SEC
+// window, polling). Returns {ok, ip, detail}.
+async function rotateOnce() {
+  if (EGRESS_MODE === 'direct') return { ok: false, ip: null, detail: 'direct mode has nothing to rotate' };
+  if (rotating) return { ok: false, ip: null, detail: 'rotation already in progress' };
+  rotating = true;
+  try {
+    const mechanics = EGRESS_ROTATE_COMMAND
+      ? await delegatedRotate()
+      : (EGRESS_MODE === 'warp' ? await warpRotate() : await torRotate());
+    if (!mechanics) return { ok: false, ip: null, detail: 'rotation commands failed' };
+    // Poll verifyEgress until the new route proves itself or the window closes.
+    const deadline = Date.now() + EGRESS_VERIFY_WAIT_SEC * 1000;
+    let last = null;
+    while (Date.now() < deadline) {
+      last = await verifyEgress({ requireNewIp: true });
+      if (last.ok) break;
+      await sleep(2000);
+    }
+    if (!last?.ok) {
+      logLine(`EGRESS ROTATE verify failed: ${last?.detail || 'no answer in window'}`);
+      return { ok: false, ip: last?.ip || null, detail: last?.detail || 'route never came up' };
+    }
+    // Drop pooled keep-alive sockets that still point through the old tunnel.
+    egressDispatcher = null;
+    egressDispatcherKey = '';
+    lastRotateAt = Date.now();
+    saveLastRotateAt();
+    logLine(`EGRESS ROTATE ok (mode=${EGRESS_MODE}) — new exit IP ${last.ip} (${last.detail})`);
+    return { ok: true, ip: last.ip, detail: last.detail };
+  } catch (e) {
+    logLine(`EGRESS ROTATE failed: ${e.message}`);
+    return { ok: false, ip: null, detail: e.message };
+  } finally {
+    rotating = false;
+  }
+}
+
+function saveLastRotateAt() {
+  try {
+    db.prepare(`INSERT INTO scheduler_state (key, value, updated_at) VALUES ('egress_last_rotate', ?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`).run(new Date(lastRotateAt).toISOString(), nowIso());
+  } catch { /* ignore */ }
+}
+
+// Scheduled rotation: a fresh exit IP every ROTATE_INTERVAL_SEC (default 2h)
+// while a proxy mode is active — before the WAF decides to block, not after.
+// An IP_BLOCKED rotation resets this timer, so the two never stack.
+setInterval(async () => {
+  if (!ROTATE_INTERVAL_SEC) return; // 0 = scheduled rotation disabled
+  if (!AUTOMATION_ENABLED || EGRESS_MODE === 'direct') return;
+  if (rotating || providerCooling()) return;
+  if (!lastRotateAt) {
+    // First run after start: adopt the persisted timestamp if it is recent.
+    try {
+      const row = db.prepare(`SELECT value FROM scheduler_state WHERE key = 'egress_last_rotate'`).get();
+      const at = row?.value ? Date.parse(row.value) : 0;
+      if (at && Date.now() - at < ROTATE_INTERVAL_SEC * 1000) { lastRotateAt = at; return; }
+    } catch { /* ignore */ }
+  }
+  if (lastRotateAt && Date.now() - lastRotateAt < ROTATE_INTERVAL_SEC * 1000) return;
+  logLine(`EGRESS: scheduled rotation (every ${Math.round(ROTATE_INTERVAL_SEC / 60)} min)`);
+  const r = await rotateOnce();
+  if (!r.ok) logLine(`EGRESS: scheduled rotation did not produce a new IP (${r.detail}) — keeping the current route`);
+}, 60 * 1000).unref?.();
+
+// --- route verification (ported from opencode-infinite) ---------------------
+// warp-cli status lies by omission: the tunnel can be down while status says
+// Connected. The launcher's rule: verify the route through the same proxy the
+// app uses. In WARP mode the trace must also say warp=on/plus — a trace that
+// only carries an ip= line is the VPS's real IP (privoxy up, tunnel dead), and
+// retrying on it just hammers the blocked address again.
+async function routeUp({ requireTunnel = true } = {}) {
+  const proxy = egressProxyUrl();
+  if (!proxy || EGRESS_MODE === 'direct') return { ok: true, ip: null, same: false, detail: 'direct' };
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 15000);
+    const res = await egressFetch('https://www.cloudflare.com/cdn-cgi/trace', { signal: ctrl.signal, redirect: 'manual' });
+    clearTimeout(t);
+    if (!res.ok) return { ok: false, ip: null, same: false, detail: `trace HTTP ${res.status}` };
+    const text = await res.text();
+    const ip = text.match(/^ip=(.+)$/m)?.[1]?.trim() || null;
+    const warpFlag = text.match(/^warp=(.+)$/m)?.[1]?.trim() || null;
+    const tunnelOk = !requireTunnel
+      ? Boolean(ip)
+      : EGRESS_MODE === 'warp'
+        ? (warpFlag === 'on' || warpFlag === 'plus')
+        : Boolean(ip); // tor: no warp= line exists; a 2xx trace is the best cheap proof
+    if (!ip) return { ok: false, ip: null, same: false, detail: 'trace carried no ip= line' };
+    if (!tunnelOk) {
+      return { ok: false, ip, same: false, detail: warpFlag ? `tunnel down (warp=${warpFlag}) — trace came from the real VPS IP` : 'tunnel unverified' };
+    }
+    // A rotation that hands back the same exit IP is not a rotation. Compare
+    // with the last verified IP of this process, persisted across restarts.
+    const previous = lastExitIp;
+    const same = Boolean(previous) && ip === previous;
+    return { ok: true, ip, same, detail: warpFlag ? `warp=${warpFlag}` : 'tor trace ok' };
+  } catch (e) {
+    return { ok: false, ip: null, same: false, detail: e.message };
+  }
+}
+
+// Last exit IP that passed route verification. Persisted in scheduler_state so
+// a restart does not forget which IP is already burned.
+let lastExitIp = null;
+// Total verified IP changes (bumped only when a route with a genuinely new
+// exit IP is accepted). Persisted and shown in the UI footer.
+let ipChangeCount = 0;
+function saveExitIp(ip) {
+  const isNew = Boolean(ip) && ip !== lastExitIp;
+  if (isNew) ipChangeCount += 1;
+  lastExitIp = ip;
+  try {
+    db.prepare(`INSERT INTO scheduler_state (key, value, updated_at) VALUES ('egress_exit_ip', ?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`).run(String(ip), nowIso());
+    if (isNew) {
+      db.prepare(`INSERT INTO scheduler_state (key, value, updated_at) VALUES ('egress_ip_changes', ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(excluded.value AS INTEGER) + 1 AS TEXT), updated_at = excluded.updated_at`).run(String(ipChangeCount), nowIso());
+    }
+  } catch { /* ignore */ }
+}
+(function loadExitIp() {
+  try {
+    lastExitIp = db.prepare(`SELECT value FROM scheduler_state WHERE key = 'egress_exit_ip'`).get()?.value || null;
+    const c = db.prepare(`SELECT value FROM scheduler_state WHERE key = 'egress_ip_changes'`).get()?.value;
+    ipChangeCount = Number(c) || 0;
+  } catch { /* ignore */ }
+})();
+
+// The single entry point every caller uses. Accepts the route only when it is
+// up, the tunnel is proven, and the IP differs from the last accepted one.
+// Returns {ok, ip, changed, detail}.
+async function verifyEgress({ requireNewIp = true } = {}) {
+  const r = await routeUp({ requireTunnel: true });
+  if (!r.ok) return { ok: false, ip: r.ip, changed: false, same: r.same, detail: r.detail };
+  if (requireNewIp && r.same) return { ok: false, ip: r.ip, changed: false, same: true, detail: `same exit IP as before (${r.ip}) — not accepting it` };
+  saveExitIp(r.ip);
+  return { ok: true, ip: r.ip, changed: Boolean(r.ip), same: Boolean(r.same), detail: r.detail };
+}
+
+// Probe the current egress IP with a cheap GET (Cloudflare trace).
+// Returns the IP string when the proxy answers, null otherwise.
+async function probeEgressIp() {
+  const r = await routeUp({ requireTunnel: false });
+  return r.ok ? r.ip : null;
+}
+
+// Loaded lazily so a missing undici install never blocks startup; when unavailable
+// we log once and stay direct (provider breaker still protects the scheduler).
+let undiciModule = null;
+let undiciTried = false;
+async function getUndici() {
+  if (undiciTried) return undiciModule;
+  undiciTried = true;
+  try {
+    undiciModule = await import('undici');
+    if (!undiciModule?.ProxyAgent) {
+      logLine('WARN: undici ProxyAgent unavailable, staying direct');
+      undiciModule = null;
+    }
+  } catch (e) {
+    logLine(`WARN: undici not installed (${e.message}) — staying direct, run 'npm install' in dashboard/`);
+    undiciModule = null;
+  }
+  return undiciModule;
+}
+
+let egressDispatcher = null;
+let egressDispatcherKey = '';
+async function egressFetch(url, options = {}) {
+  const key = EGRESS_MODE;
+  const proxy = egressProxyUrl();
+  if (!proxy || EGRESS_MODE === 'direct') {
+    return fetch(url, options);
+  }
+  const mod = await getUndici();
+  if (!mod?.ProxyAgent) return fetch(url, options);
+  const keyToday = `${key}|${proxy}`;
+  if (keyToday !== egressDispatcherKey) {
+    egressDispatcher = new mod.ProxyAgent(proxy);
+    egressDispatcherKey = keyToday;
+    logLine(`EGRESS: mode=${key} proxy=${proxy} dispatcher ready`);
+  }
+  return fetch(url, { ...options, dispatcher: egressDispatcher });
+}
+
+async function egressHealth() {
+  const mode = EGRESS_MODE;
+  const proxy = egressProxyUrl();
+  if (mode === 'direct') return { mode, proxy, ok: true, detail: 'direct connection' };
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 10 * 1000);
+    const res = await egressFetch(EGRESS_TEST_URL, { signal: ctrl.signal, redirect: 'manual' });
+    clearTimeout(t);
+    // A 5xx from the proxy (privoxy up, Tor dead) resolves as a response, not a
+    // throw — counting it as healthy would hide a dead circuit. Require 2xx/3xx.
+    if (!res.ok && res.status >= 500) {
+      return { mode, proxy, ok: false, detail: `proxy answered but upstream failed (HTTP ${res.status}) — tunnel down?` };
+    }
+    return { mode, proxy, ok: true, detail: `proxy answering at ${proxy}` };
+  } catch (e) {
+    return { mode, proxy, ok: false, detail: `proxy unreachable (${e.message}) — is the sidecar running?` };
+  }
+}
+
+function loadEgressState() {
+  try {
+    const row = db.prepare(`SELECT value FROM scheduler_state WHERE key = 'egress_mode'`).get();
+    if (row?.value && EGRESS_MODES.includes(row.value)) {
+      EGRESS_MODE = row.value;
+      logLine(`EGRESS: restored mode=${EGRESS_MODE} (persisted from previous run)`);
+    }
+  } catch { /* ignore */ }
+}
+function saveEgressState() {
+  try {
+    db.prepare(`INSERT INTO scheduler_state (key, value, updated_at) VALUES ('egress_mode', ?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`).run(EGRESS_MODE, nowIso());
+  } catch { /* ignore */ }
+}
+
+// Periodic egress health probe while warp/tor is selected. Failures just log —
+// the provider breaker remains the real gate for the scheduler.
+setInterval(async () => {
+  if (EGRESS_MODE === 'direct') return;
+  const h = await egressHealth();
+  if (!h.ok) logLine(`EGRESS health: ${h.detail}`);
+}, EGRESS_HEALTH_INTERVAL_SEC * 1000).unref?.();
+
 async function apiRequest({ method, path, token = null, body = undefined, holdingId = null, probe = false }) {
   const endpoint = `${API_BASE}${path}`;
   const headers = { Accept: 'application/json' };
@@ -556,7 +928,7 @@ async function apiRequest({ method, path, token = null, body = undefined, holdin
 
   let response;
   try {
-    response = await fetch(endpoint, {
+    response = await egressFetch(endpoint, {
       method,
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
@@ -573,6 +945,85 @@ async function apiRequest({ method, path, token = null, body = undefined, holdin
   if (response.status === 429) {
     noteProviderPressure('rate_limit', { escalate: !probe });
   } else if (response.status === 403 && /IP_BLOCKED|razones de seguridad/i.test(JSON.stringify(payload || ''))) {
+    if (EGRESS_MODE !== 'direct') {
+      // IP hunt: rotate the egress IP and retry the same call on the fresh
+      // route. An attempt only counts when rotateOnce VERIFIES the new route
+      // (tunnel proven + IP actually changed) — a failed rotation must not
+      // clear the breaker, or we would hammer a still-blocked IP.
+      logLine(`EGRESS: IP_BLOCKED on ${path} via ${EGRESS_MODE} — starting IP hunt (max ${ROTATE_TRIES_MAX} tries)`);
+      let newIp = null;
+      let lastDetail = 'no attempt succeeded';
+      for (let attempt = 1; attempt <= ROTATE_TRIES_MAX; attempt++) {
+        const r = await rotateOnce();
+        if (r.ok) {
+          newIp = r.ip;
+          lastDetail = r.detail;
+          logLine(`EGRESS: rotate #${attempt}/${ROTATE_TRIES_MAX} ok — exit IP ${r.ip}`);
+          break;
+        }
+        logLine(`EGRESS: rotate #${attempt}/${ROTATE_TRIES_MAX} failed (${r.detail})`);
+        lastDetail = r.detail;
+        if (attempt < ROTATE_TRIES_MAX) await sleep(ROTATE_COOLDOWN_SEC * 1000);
+      }
+      if (newIp) {
+        // The block was per-IP and the new exit is verified — clear the
+        // breaker and re-issue the same request once on the fresh route.
+        providerCooldownUntil = 0;
+        providerStrikes = 0;
+        lastProviderPressureAt = 0;
+        saveProviderState();
+        logLine(`EGRESS: hunt succeeded (new IP ${newIp}), clearing cooldown and retrying on new IP`);
+        try {
+          const retry = await egressFetch(endpoint, {
+            method,
+            headers,
+            body: body === undefined ? undefined : JSON.stringify(body),
+            redirect: 'manual',
+          });
+          const retryPayload = await readResponse(retry);
+          if (retry.ok) {
+            noteProviderOk({ force: probe });
+            recordEvent({
+              holdingId,
+              endpoint: path,
+              method,
+              statusCode: retry.status,
+              request: redactForLog(path, body),
+              response: redactForLog(path, retryPayload),
+            });
+            return retryPayload;
+          }
+          // Still blocked (or other error) on the new IP — fall through to
+          // the standard pressure path so the breaker escalates normally.
+          if (retry.status === 403 && /IP_BLOCKED|razones de seguridad/i.test(JSON.stringify(retryPayload || ''))) {
+            // A block on a JUST-ROTATED IP is not a 1-6h situation: the next
+            // run rotates again. Cap the breaker to a short cooldown instead.
+            noteProviderPressure('ip_block', { escalate: !probe, capSec: EGRESS_SHORT_BLOCK_COOLDOWN_SEC });
+          }
+          const rBits = [];
+          if (retryPayload && typeof retryPayload === 'object') {
+            if (retryPayload.error) rBits.push(String(retryPayload.error));
+            if (retryPayload.message && retryPayload.message !== retryPayload.error) rBits.push(String(retryPayload.message));
+          }
+          const rSuffix = rBits.length ? ` (${rBits.join(' — ').slice(0, 220)})` : '';
+          const err = errorWithStatus(`Provider returned HTTP ${retry.status}${rSuffix}`, retry.status, retryPayload);
+          err.details = { ...err.details, egressRotated: true, exitIp: newIp };
+          throw err;
+        } catch (retryError) {
+          if (Number.isInteger(retryError.status)) {
+            retryError.details = { ...retryError.details, egressRotated: true, exitIp: newIp };
+            throw retryError;
+          }
+          // Network failure on the retry — treat as provider-down, fall through.
+          recordEvent({ holdingId, endpoint: path, method, request: redactForLog(path, body), response: { network_error: retryError.message } });
+          throw errorWithStatus(`Provider request failed: ${retryError.message}`, 502);
+        }
+      }
+      // The hunt never produced a verified new IP. Keep the breaker the way
+      // the block left it (the caller's noteProviderPressure below) — the WAF
+      // block is still live on this exit, and hammering extends it.
+      logLine(`EGRESS: hunt gave up after ${ROTATE_TRIES_MAX} tries (${lastDetail}) — breaker stays up`);
+    }
     noteProviderPressure('ip_block', { escalate: !probe });
   } else if (response.ok) {
     noteProviderOk({ force: probe });
@@ -1209,10 +1660,20 @@ async function handleApi(req, res, url) {
       passwordProtected: Boolean(DASHBOARD_PASSWORD),
       autoStopHourMadrid: AUTO_STOP_HOUR_MADRID,
       autoStopDefaultRule: `Auto stops at ${String(AUTO_STOP_HOUR_MADRID).padStart(2, '0')}:00 Spain on the day before the slot date (slot 22nd -> 21st 21:00 Spain).`,
+      egress: {
+        mode: EGRESS_MODE,
+        proxyUrl: egressProxyUrl(),
+        health: await egressHealth(),
+        exitIp: lastExitIp,
+        ipChanges: ipChangeCount,
+        lastRotateAt: lastRotateAt ? new Date(lastRotateAt).toISOString() : null,
+        rotateEverySec: ROTATE_INTERVAL_SEC,
+        nextRotateAt: (lastRotateAt && ROTATE_INTERVAL_SEC) ? new Date(lastRotateAt + ROTATE_INTERVAL_SEC * 1000).toISOString() : null,
+      },
     });
   }
   if (req.method === 'GET' && url.pathname === '/api/health') {
-    return sendJson(res, 200, { ok: true, automationEnabled: AUTOMATION_ENABLED, database: 'sqlite', scheduler: getSchedulerStatus() });
+    return sendJson(res, 200, { ok: true, automationEnabled: AUTOMATION_ENABLED, database: 'sqlite', scheduler: getSchedulerStatus(), egress: { mode: EGRESS_MODE, proxyUrl: egressProxyUrl(), health: await egressHealth(), exitIp: lastExitIp } });
   }
   if (req.method === 'GET' && url.pathname === '/api/holdings') {
     return sendJson(res, 200, { holdings: listHoldings(), scheduler: getSchedulerStatus() });
@@ -1303,9 +1764,13 @@ async function handleApi(req, res, url) {
           } catch { /* ignore */ }
           logLine(`AUTO-STOP #${holding.id}: initial failed past ${madridStamp(at)} -> auto_stopped`);
         } else {
-          const delaySec = /NO_CAPACITY|FULLY|already_booked|closed|time_not_found|date_not_found|HTTP 40[39]|No tickets/i.test(error.message || '')
-            ? RETRY_BOOKED_SEC
-            : RETRY_FAILED_SEC;
+          // IP_BLOCKED on a run that already rotated: re-run soon on the new
+          // IP instead of the long backoff (same rule as the scheduler).
+          const delaySec = /IP_BLOCKED|razones de seguridad/i.test(error.message || '') && error.details?.egressRotated
+            ? ROTATE_RETRY_AFTER_BLOCK_SEC
+            : /NO_CAPACITY|FULLY|already_booked|closed|time_not_found|date_not_found|HTTP 40[39]|No tickets/i.test(error.message || '')
+              ? RETRY_BOOKED_SEC
+              : RETRY_FAILED_SEC;
           try {
             updateHolding(holding.id, {
               next_run_at: new Date(Date.now() + delaySec * 1000).toISOString(),
@@ -1327,6 +1792,57 @@ async function handleApi(req, res, url) {
     AUTOMATION_ENABLED = false;
     logLine('SCHEDULER: automation disabled via UI');
     return sendJson(res, 200, { scheduler: getSchedulerStatus() });
+  }
+  // Manual "rotate now" from the UI/diagnostics: same verified path as the
+// automatic hunt. The breaker is cleared only when a genuinely new exit IP
+// lands — otherwise the block is still live and the cooldown must stay.
+if (req.method === 'POST' && url.pathname === '/api/egress/rotate') {
+    if (EGRESS_MODE === 'direct') throw errorWithStatus('Egress is direct — nothing to rotate. Switch to warp or tor first.', 400);
+    const r = await rotateOnce();
+    if (r.ok) {
+      providerCooldownUntil = 0;
+      providerStrikes = 0;
+      lastProviderPressureAt = 0;
+      saveProviderState();
+      logLine(`EGRESS: manual rotation ok — new exit IP ${r.ip}, breaker cleared`);
+    } else {
+      logLine(`EGRESS: manual rotation failed (${r.detail}) — breaker unchanged`);
+    }
+    return sendJson(res, 200, { ok: r.ok, ip: r.ip, detail: r.detail, mode: EGRESS_MODE, proxyUrl: egressProxyUrl(), health: await egressHealth(), exitIp: lastExitIp, ipChanges: ipChangeCount });
+  }
+  if (req.method === 'POST' && url.pathname === '/api/egress') {
+    const body = await readJsonBody(req);
+    const mode = String(body.mode || '').toLowerCase();
+    if (!EGRESS_MODES.includes(mode)) {
+      throw errorWithStatus(`mode must be one of ${EGRESS_MODES.join(', ')} (got '${body.mode}')`, 400);
+    }
+    EGRESS_MODE = mode;
+    saveEgressState();
+    // Switching egress invalidates the dispatcher cache.
+    egressDispatcher = null;
+    egressDispatcherKey = '';
+    // New IP means the block is likely gone — clear the cooldown for a clean retry.
+    providerCooldownUntil = 0;
+    providerStrikes = 0;
+    lastProviderPressureAt = 0;
+    saveProviderState();
+    // Verify what we just switched to: proxy answering and, in WARP mode, the
+    // tunnel actually proven. In warp/tor modes this also rotates immediately
+    // when the route is not ready, so the user does not inherit a dead tunnel.
+    let health = await egressHealth();
+    let verify = null;
+    if (mode !== 'direct') {
+      verify = await verifyEgress({ requireNewIp: false });
+      if (!verify.ok) {
+        logLine(`EGRESS: switched to ${mode} but route not verified (${verify.detail}) — rotating once`);
+        const r = await rotateOnce();
+        if (r.ok) verify = { ok: true, ip: r.ip, detail: r.detail };
+        else verify = { ok: false, detail: r.detail };
+      }
+      health = await egressHealth();
+    }
+    logLine(`EGRESS: switched to ${mode} via UI — proxy=${egressProxyUrl()} health=${health.ok ? 'ok' : health.detail}${verify ? ` verify=${verify.ok ? `ok (${verify.ip || 'n/a'})` : verify.detail}` : ''}`);
+    return sendJson(res, 200, { mode: EGRESS_MODE, proxyUrl: egressProxyUrl(), health, verify, exitIp: lastExitIp, ipChanges: ipChangeCount });
   }
   if (segments[0] === 'api' && segments[1] === 'holdings' && segments[2]) {
     const id = parseId(segments[2]);
@@ -1549,7 +2065,14 @@ async function runSchedulerTick() {
       const status = e.status === 409 ? 'booked' : 'failed';
       const cur = getHolding(h.id);
       const streak = Number(cur.fail_streak || 0) + 1;
-      const delaySec = retryDelayFor(status, e.message, streak);
+      let delaySec = retryDelayFor(status, e.message, streak);
+      // IP_BLOCKED on a run that already rotated the egress: the holding is
+      // fine, the route was poisoned. The rotation just installed a fresh IP,
+      // so re-run this failed holding after the short delay instead of the
+      // long sellout backoff — and do not let the streak inflate the wait.
+      if (/IP_BLOCKED|razones de seguridad/i.test(e.message || '') && e.details?.egressRotated) {
+        delaySec = ROTATE_RETRY_AFTER_BLOCK_SEC;
+      }
       const nextRun = new Date(Date.now() + delaySec * 1000).toISOString();
       const patch = { next_run_at: nextRun, last_error: e.message, fail_streak: streak };
       // A failure before cart/add (auth, availability) throws before
@@ -1696,9 +2219,55 @@ const server = createServer(async (req, res) => {
   }
 });
 
+loadProviderState();
+loadEgressState();
+
+// Startup bootstrap for proxy modes: the VPS IP may already be WAF-blocked
+// (or the persisted exit IP stale), so before the first scheduler tick fires
+// we verify the route and rotate until a fresh, proven exit IP is live. A
+// short cooldown keeps ticks away while this runs; success clears it.
+async function bootstrapEgress() {
+  if (EGRESS_MODE === 'direct') return;
+  logLine(`EGRESS bootstrap: mode=${EGRESS_MODE} — verifying route before first tick`);
+  // Hold the scheduler for up to 2 min while the route is sorted out. Any
+  // restored cooldown belongs to the old (blocked) IP — override it. If the
+  // bootstrap fails, this expires and normal breaker behaviour takes over.
+  providerCooldownUntil = Date.now() + 120 * 1000;
+  providerStrikes = 0;
+  saveProviderState();
+  const v = await verifyEgress({ requireNewIp: false });
+  if (v.ok && !v.same) {
+    // Route already differs from the persisted (possibly blocked) IP: adopt it.
+    logLine(`EGRESS bootstrap: route verified with fresh IP ${v.ip}`);
+    providerCooldownUntil = 0;
+    providerStrikes = 0;
+    lastProviderPressureAt = 0;
+    saveProviderState();
+    return;
+  }
+  // Same exit IP as before (possibly the blocked one) or route down — rotate.
+  for (let attempt = 1; attempt <= ROTATE_TRIES_MAX; attempt++) {
+    const r = await rotateOnce();
+    if (r.ok) {
+      providerCooldownUntil = 0;
+      providerStrikes = 0;
+      lastProviderPressureAt = 0;
+      saveProviderState();
+      logLine(`EGRESS bootstrap: fresh exit IP ${r.ip} — automation can run`);
+      return;
+    }
+    logLine(`EGRESS bootstrap: rotate #${attempt}/${ROTATE_TRIES_MAX} failed (${r.detail})`);
+    if (attempt < ROTATE_TRIES_MAX) await sleep(ROTATE_COOLDOWN_SEC * 1000);
+  }
+  logLine('EGRESS bootstrap: could not obtain a verified new IP — leaving the short cooldown to expire; the IP_BLOCKED hunt will retry on the first run');
+}
+
 server.listen(PORT, () => {
+  // Fire-and-forget: the bootstrap sorts the route while the port opens.
+  bootstrapEgress().catch((e) => logLine(`EGRESS bootstrap error: ${e.message}`));
   logLine(`START port=${PORT} db=${DB_PATH}`);
   logLine(`START automation=${AUTOMATION_ENABLED} tick=${TICK_INTERVAL_MS}ms append=${ALLOW_CART_APPEND} repeat=${DEFAULT_REPEAT_MINUTES}m+${DEFAULT_REPEAT_OFFSET_SEC}s rebuyLead=${REBUY_LEAD_SEC}s`);
+  logLine(`START egress mode=${EGRESS_MODE} proxy=${egressProxyUrl() || '(none)'} rotateEvery=${Math.round(ROTATE_INTERVAL_SEC / 60)}min${EGRESS_ROTATE_COMMAND ? ' rotateCommand=delegated' : ''}`);
   if (!API_KEY) logLine('WARN: SERVITICKETS_API_KEY is missing — set it in dashboard/.env');
   logLine(`START web password=${DASHBOARD_PASSWORD ? 'ON' : 'OFF'}`);
   logLine(`START auto stop default ${String(AUTO_STOP_HOUR_MADRID).padStart(2, '0')}:00 ${APP_TZ} day-before (per-holding editable)`);

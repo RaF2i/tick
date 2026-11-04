@@ -1151,13 +1151,50 @@ async function toggleAuto() {
   } catch (e) { showNotice(e.message, 'error'); }
   finally { setBtn(btn, false); }
 }
+// Footer egress summary: current exit IP + how many verified IP changes have
+// happened. Reads state.config.egress (refreshed on every boot/poll).
+function renderEgressFooter() {
+  const el = document.getElementById('egressFooter');
+  if (!el) return;
+  const e = state.config?.egress;
+  if (!e) { el.textContent = 'egress: —'; return; }
+  const ip = e.exitIp || 'unknown';
+  const n = Number.isInteger(e.ipChanges) ? e.ipChanges : 0;
+  el.textContent = `egress: ${e.mode} · ip ${ip} · ${n} IP change${n === 1 ? '' : 's'}`;
+}
+
 let routeResolved = false;
 async function boot(reset = true) {
   try {
     state.config = await api('/api/config');
     $('#configPre').textContent = JSON.stringify(state.config, null, 2);
-    $('#tzPill').textContent = `Times: ${state.config?.timezoneLabel || 'Spain (Europe/Madrid)'}`;
-    if (state.config?.passwordProtected) $('#logoutBtn')?.classList.remove('hidden');
+  $('#tzPill').textContent = `Times: ${state.config?.timezoneLabel || 'Spain (Europe/Madrid)'}`;
+  if (state.config?.passwordProtected) $('#logoutBtn')?.classList.remove('hidden');
+  // Egress picker mirrors the server mode (config.egress.mode).
+  const egressSelect = $('#egressMode');
+  if (egressSelect && state.config?.egress?.mode) egressSelect.value = state.config.egress.mode;
+  if (egressSelect) {
+    const hint = $('#egressHint');
+    if (hint && state.config?.egress) {
+      const e = state.config.egress;
+      hint.textContent = `Current: ${e.mode} (${e.proxyUrl || 'no proxy'}) — ${e.health ? e.health.detail : ''}`;
+    }
+  }
+  renderEgressFooter();
+  $('#egressApply')?.addEventListener('click', async () => {
+    const sel = $('#egressMode'); if (!sel) return;
+    const btn = $('#egressApply'); setBtn(btn, true, 'Applying…');
+    try {
+      const r = await api('/api/egress', { method: 'POST', body: JSON.stringify({ mode: sel.value }) });
+      showNotice(`Egress: ${r.mode} — ${r.health?.ok ? 'ok' : r.health?.detail}`, r.health?.ok ? 'success' : 'error');
+      state.config.egress = { mode: r.mode, proxyUrl: r.proxyUrl, health: r.health, exitIp: r.exitIp, ipChanges: r.ipChanges };
+      $('#configPre').textContent = JSON.stringify(state.config, null, 2);
+      renderEgressFooter();
+      const hint = $('#egressHint');
+      if (hint) hint.textContent = `Current: ${r.mode} (${r.proxyUrl || 'no proxy'}) — ${r.health?.detail || ''}`;
+    } catch (e) { showNotice(e.message, 'error'); }
+    finally { setBtn(btn, false); }
+  });
     await loadHoldings({ force: !state.booted });
     if (!routeResolved) {
       routeResolved = true;

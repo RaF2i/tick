@@ -2,6 +2,9 @@
   "name": "ticket-control-dashboard",
   "private": true,
   "type": "module",
+  "dependencies": {
+    "undici": "^7.16.0"
+  },
   "scripts": {
     "start": "node server.mjs",
     "check": "node --check server.mjs"
