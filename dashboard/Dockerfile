@@ -4,8 +4,12 @@ WORKDIR /app
 
 # App code is baked into the image; the database and logs live on the host and
 # are bind-mounted at /data, so rebuilding never touches them.
-COPY package.json ./
+COPY package.json package-lock.json ./
+# undici is required for the egress proxy (warp/tor modes); plain fetch keeps
+# working when the optional install fails, so do not fail the image over it.
+RUN npm ci --omit=dev || npm install --omit=dev || true
 COPY server.mjs ./
+COPY tools ./tools
 COPY public ./public
 
 ENV NODE_ENV=production \
