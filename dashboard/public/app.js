@@ -1180,7 +1180,9 @@ function renderEgressFooter() {
   const n = Number.isInteger(e.ipChanges) ? e.ipChanges : 0;
   const ago = agoText(e.lastRotateAt);
   const parts = [`egress: ${e.mode}`, `ip ${ip}`, `${n} IP change${n === 1 ? '' : 's'}`];
+  // Only claim an age when there is a usable timestamp; never print "NaNd ago".
   if (ago) parts.push(`last changed ${ago}`);
+  else if (!e.lastRotateAt) parts.push('last changed —');
   el.textContent = parts.join(' · ');
   el.title = e.lastRotateAt ? `Last verified IP change: ${new Date(e.lastRotateAt).toLocaleString()}` : 'No IP change recorded yet';
 }

@@ -814,6 +814,11 @@ function saveExitIp(ip) {
     lastExitIp = db.prepare(`SELECT value FROM scheduler_state WHERE key = 'egress_exit_ip'`).get()?.value || null;
     const c = db.prepare(`SELECT value FROM scheduler_state WHERE key = 'egress_ip_changes'`).get()?.value;
     ipChangeCount = Number(c) || 0;
+    // Restore the rotation clock too, or a restart would forget when the last
+    // change happened (footer shows nothing, schedule restarts from zero).
+    const lr = db.prepare(`SELECT value FROM scheduler_state WHERE key = 'egress_last_rotate'`).get()?.value;
+    const at = lr ? Date.parse(lr) : 0;
+    if (at && Number.isFinite(at)) lastRotateAt = at;
   } catch { /* ignore */ }
 })();
 
@@ -2244,6 +2249,11 @@ loadEgressState();
 async function bootstrapEgress() {
   if (EGRESS_MODE === 'direct') return;
   logLine(`EGRESS bootstrap: mode=${EGRESS_MODE} — verifying route before first tick`);
+  // A delegated rotation with no token can never succeed (the host helper
+  // answers 401). Say so once, loudly, instead of failing with "bad token".
+  if (EGRESS_ROTATE_COMMAND && !process.env.ROTATE_TOKEN) {
+    logLine('WARN: EGRESS_ROTATE_COMMAND is set but ROTATE_TOKEN is empty — delegated rotations will be rejected by the host helper');
+  }
   // Hold the scheduler for up to 2 min while the route is sorted out. Any
   // restored cooldown belongs to the old (blocked) IP — override it. If the
   // bootstrap fails, this expires and normal breaker behaviour takes over.
@@ -2251,14 +2261,22 @@ async function bootstrapEgress() {
   providerStrikes = 0;
   saveProviderState();
   const v = await verifyEgress({ requireNewIp: false });
-  if (v.ok && !v.same) {
-    // Route already differs from the persisted (possibly blocked) IP: adopt it.
-    logLine(`EGRESS bootstrap: route verified with fresh IP ${v.ip}`);
-    providerCooldownUntil = 0;
-    providerStrikes = 0;
-    lastProviderPressureAt = 0;
-    saveProviderState();
-    return;
+  if (v.ok) {
+    // The route is up. If the exit IP is still within its rotation window,
+    // adopt it — a restart must not burn a fresh IP (and a needless rotation
+    // is also the most likely one to fail). Only rotate when the IP is the
+    // same as the persisted one AND older than the rotation interval.
+    const ageMs = lastRotateAt ? Date.now() - lastRotateAt : Infinity;
+    const fresh = ageMs < ROTATE_INTERVAL_SEC * 1000;
+    if (!v.same || fresh) {
+      logLine(`EGRESS bootstrap: route verified, IP ${v.ip}${fresh ? ` (rotated ${Math.round(ageMs / 60000)}m ago — still fresh)` : ' (already different from the persisted IP)'} — no rotation needed`);
+      providerCooldownUntil = 0;
+      providerStrikes = 0;
+      lastProviderPressureAt = 0;
+      saveProviderState();
+      return;
+    }
+    logLine(`EGRESS bootstrap: exit IP ${v.ip} is unchanged and older than ${Math.round(ROTATE_INTERVAL_SEC / 60)}m — rotating`);
   }
   // Same exit IP as before (possibly the blocked one) or route down — rotate.
   for (let attempt = 1; attempt <= ROTATE_TRIES_MAX; attempt++) {
