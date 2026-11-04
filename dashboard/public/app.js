@@ -1151,8 +1151,26 @@ async function toggleAuto() {
   } catch (e) { showNotice(e.message, 'error'); }
   finally { setBtn(btn, false); }
 }
-// Footer egress summary: current exit IP + how many verified IP changes have
-// happened. Reads state.config.egress (refreshed on every boot/poll).
+// Compact "time since" for the footer: 45s ago, 12m ago, 1h24m ago, 3d ago.
+function agoText(iso) {
+  if (!iso) return null;
+  const ms = Date.now() - Date.parse(iso);
+  if (!Number.isFinite(ms) || ms < 0) return null;
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  const rm = m % 60;
+  if (h < 24) return rm ? `${h}h${rm}m ago` : `${h}h ago`;
+  const d = Math.floor(h / 24);
+  const rh = h % 24;
+  return rh ? `${d}d${rh}h ago` : `${d}d ago`;
+}
+
+// Footer egress summary: current exit IP, how many verified IP changes have
+// happened, and when the last one was. Reads state.config.egress (refreshed on
+// boot/poll) and re-renders every second so the "ago" stays accurate.
 function renderEgressFooter() {
   const el = document.getElementById('egressFooter');
   if (!el) return;
@@ -1160,7 +1178,11 @@ function renderEgressFooter() {
   if (!e) { el.textContent = 'egress: —'; return; }
   const ip = e.exitIp || 'unknown';
   const n = Number.isInteger(e.ipChanges) ? e.ipChanges : 0;
-  el.textContent = `egress: ${e.mode} · ip ${ip} · ${n} IP change${n === 1 ? '' : 's'}`;
+  const ago = agoText(e.lastRotateAt);
+  const parts = [`egress: ${e.mode}`, `ip ${ip}`, `${n} IP change${n === 1 ? '' : 's'}`];
+  if (ago) parts.push(`last changed ${ago}`);
+  el.textContent = parts.join(' · ');
+  el.title = e.lastRotateAt ? `Last verified IP change: ${new Date(e.lastRotateAt).toLocaleString()}` : 'No IP change recorded yet';
 }
 
 let routeResolved = false;
@@ -1421,4 +1443,6 @@ function schedulePoll() {
 schedulePoll();
 // Live next-run countdowns, every second
 setInterval(tickCountdowns, 1000);
+// Keep the footer's "last changed" honest without re-fetching
+setInterval(renderEgressFooter, 1000);
 boot();
